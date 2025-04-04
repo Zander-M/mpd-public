@@ -46,7 +46,8 @@ class GaussianDiffusionFactorModel(GaussianDiffusionModel):
                                agent_idx,
                                context=None, hard_conds=None, 
                                n_samples=1, 
-                               factor_guide=None,
+                               model_guide=None,
+                               model_step=50,
                                **diffusion_kwargs):
         """
             Run inference for one step for one agent, conditioned on other agent's trajectories
@@ -72,11 +73,24 @@ class GaussianDiffusionFactorModel(GaussianDiffusionModel):
             traj, t, hard_conds, context=context, batch_size=n_samples, **diffusion_kwargs
         )
 
-        # Factor Graph inference 
-        print("Factor Guidance Update!")
-        if factor_guide is not None:
-            # TODO: factor graph inference here!
-            print("Factor Guidance Update!")
+        # Model Guidance
+        if model_guide is not None:
+            mask = torch.ones(trajs_normalized.shape[0], dtype=bool, device=trajs_normalized.device)
+            mask[agent_idx] = False
+            noisy_trajs_others = trajs_normalized[mask]  # (N-1, B, T, D)
+
+            # prepare variance based on schedule
+            alpha_bar_t = self.alphas_cumprod[t].clone().detach().to(samples.device)
+            alpha_bar_t = torch.tensor(alpha_bar_t, device=samples.device)
+
+            updated_samples = model_guide.infer(
+                noisy_traj_batch=samples,
+                noisy_trajs_others=noisy_trajs_others,
+                alpha_bar_t=alpha_bar_t,
+                factor_steps=model_step, # make this a parameter
+            )
+            samples[:] = updated_samples
+
 
         # return the last denoising step
         return samples
@@ -108,58 +122,4 @@ class GaussianDiffusionFactorModel(GaussianDiffusionModel):
         # One step of denoising using the sampling function
         x, values = sample_fn(self, x, hard_conds, context, t, **sample_kwargs)
         x = apply_hard_conditioning(x, hard_conds)
-        return x
-
-    def apply_factor_inference(self, x, t_idx, 
-                               num_svi_steps=100,
-                               step_size=0.01,
-                               collision_margin=0.1):
-        """
-        Use Pyro to run inference over a factor graph that enforces:
-        1. Piecewise linearity of trajectories.
-        # TODO: add obstacles, add other agents state with variance schedule
-
-        """
-        # Detach and allow gradients for optimization
-        x = x.detach().clone()
-        x.requires_grad = True
-    
-        batch_size, num_agents, dim = x.shape
-    
-        # Pyro model
-        def model():
-            for b in range(batch_size):
-                for i in range(num_agents - 1):
-                    # Piecewise linearity prior
-                    prev = pyro.sample(f"x_{b}_{i}", dist.Normal(x[b, i], 0.1))
-                    curr = pyro.sample(f"x_{b}_{i+1}", dist.Normal(prev, 0.1))
-    
-                    # Collision avoidance
-                    for obs in self.map.obstacles:  # Assumes a list of circular obstacles
-                        center = torch.tensor(obs['center'], device=x.device)
-                        radius = obs['radius']
-                        dist_to_obs = (curr - center).norm()
-                        pyro.factor(f"obs_factor_{b}_{i}", -torch.relu(radius + collision_margin - dist_to_obs) ** 2)
-    
-        # Guide
-        def guide():
-            for b in range(batch_size):
-                for i in range(num_agents):
-                    loc = pyro.param(f"loc_{b}_{i}", x[b, i].clone())
-                    scale = pyro.param(f"scale_{b}_{i}", torch.ones_like(x[b, i]) * 0.1, constraint=pyro.distributions.constraints.positive)
-                    pyro.sample(f"x_{b}_{i}", dist.Normal(loc, scale))
-    
-        # Optimizer and inference object
-        pyro.clear_param_store()
-        svi = SVI(model, guide, Adam({"lr": step_size}), loss=Trace_ELBO())
-    
-        # Run SVI
-        for _ in range(num_svi_steps):
-            svi.step()
-    
-        # Extract inferred mean trajectory
-        for b in range(batch_size):
-            for i in range(num_agents):
-                x[b, i] = pyro.param(f"loc_{b}_{i}").detach()
-    
         return x

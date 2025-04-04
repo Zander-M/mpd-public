@@ -17,6 +17,8 @@ from mp_baselines.planners.costs.cost_functions import CostCollision, CostCompos
 from mpd.models import TemporalUnet, UNET_DIM_MULTS
 from mpd.models.diffusion_models.guides import GuideManagerTrajectoriesWithVelocity
 from mpd.models.diffusion_models.sample_functions import guide_gradient_steps, ddpm_sample_fn
+from mpd.models.guides.factor_graph_guide import CollisionAvoidanceGuide
+from mpd.models.guides.monte_carlo_guide import MonteCarloGuide
 from mpd.trainer import get_dataset, get_model
 from mpd.utils.loading import load_params_from_yaml
 from torch_robotics.robots import RobotPanda
@@ -37,9 +39,9 @@ TRAINED_MODELS_DIR = '../../data_trained_models/'
 def experiment(
     ########################################################################################################################
     # Experiment configuration
-    # model_id: str = 'EnvDense2D-RobotPointMassFactor',
+    model_id: str = 'EnvDense2D-RobotPointMassFactor',
     # model_id: str = 'EnvNarrowPassageDense2D-RobotPointMassFactor',
-    model_id: str = 'EnvSimple2D-RobotPointMassFactor',
+    # model_id: str = 'EnvSimple2D-RobotPointMassFactor',
 
     # planner_alg: str = 'diffusion_prior',
     # planner_alg: str = 'diffusion_prior_then_guide',
@@ -47,8 +49,8 @@ def experiment(
 
     use_guide_on_extra_objects_only: bool = False,
 
-    num_agents: int = 1, # sanity check
-    # num_agents: int = 2, # number of agents
+    # num_agents: int = 1, # sanity check
+    num_agents: int = 8, # number of agents
 
     n_samples: int = 50,
 
@@ -68,7 +70,7 @@ def experiment(
 
     debug: bool = True,
 
-    render: bool = True,
+    render: bool = False,
 
     ########################################################################
     # MANDATORY
@@ -192,7 +194,6 @@ def experiment(
         dataset.get_hard_conditions(start_goal_tensor[i], normalize=True)
         for i in range(num_agents)
     ]
-    print("hard_conds: ", hard_conds_all)
     context = None
 
     ########
@@ -259,7 +260,12 @@ def experiment(
 
     ######## Initial Factor Guide
     # TODO: implement factor graph based guide here
-    factor_guide = None
+    model_guide = MonteCarloGuide(
+        n_support_points, dataset.state_dim, 1e-8
+    ) 
+    model_step = 1 
+
+    # model_guide = None
 
     ########
     # Sample trajectories with the diffusion/cvae model
@@ -280,7 +286,8 @@ def experiment(
                     context=None, hard_conds=hard_conds,
                     n_samples=n_samples, horizon=n_support_points,
                     sample_fn=ddpm_sample_fn,
-                    factor_guide=factor_guide,
+                    model_guide=model_guide,
+                    model_step=model_step,
                     **sample_fn_kwargs,
                     # ddim=True
                 )
@@ -317,7 +324,49 @@ def experiment(
 
     # unnormalize trajectory samples from the models
     # TODO: collect multi-agent stats here
-    trajs_iters = dataset.unnormalize_trajectories(torch.stack(trajs_normalized_iters[0]))
+    trajs_iters_all =[
+         dataset.unnormalize_trajectories(torch.stack(trajs_normalized_iters[agent_idx]))
+         for agent_idx in range(num_agents)
+    ]
+
+    trajs_iters_all_agents_pos = [
+        robot.get_position(trajs) for trajs in trajs_iters_all
+    ]
+    trajs_iters_all_agents_pos = torch.stack(trajs_iters_all_agents_pos)  
+
+
+    # rendering
+    planner_visualizer = PlanningVisualizer(
+        task=task
+    )
+    planner_visualizer.render_multi_robot_trajectories(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos)
+    plt.show()
+    planner_visualizer.animate_opt_iters_multi_robots(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos)
+    return
+
+
+
+    # Plot all agents' denoising trajectories
+
+    fig = plt.figure(figsize=(8, 8))
+    ax = fig.add_subplot(111)
+
+    print("traj shape", trajs_iters_all_agents_pos.shape)
+    num_steps = trajs_iters_all_agents_pos.shape[1]
+    for t in range(num_steps):
+        for agent_idx in range(num_agents):
+            colors = plt.cm.viridis(torch.linspace(0, 1, num_steps))
+            pos = trajs_iters_all_agents_pos[agent_idx, t, 0].cpu().numpy()
+            ax.plot(pos[:, 0], pos[:, 1], color=colors[t], alpha=0.5)
+
+    ax.set_title("Denoising Trajectories for All Agents")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_aspect("equal")
+    plt.tight_layout()
+    plt.show()
+    return
+
     trajs_final = trajs_iters[-1]
 
     trajs_final_coll, trajs_final_coll_idxs, trajs_final_free, trajs_final_free_idxs, _ = task.get_trajs_collision_and_free(trajs_final, return_indices=True)
