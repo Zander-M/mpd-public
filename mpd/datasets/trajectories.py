@@ -9,8 +9,8 @@ from torch.utils.data import Dataset
 from mpd.datasets.normalization import DatasetNormalizer
 from mpd.utils.loading import load_params_from_yaml
 from torch_robotics import environments, robots
-from torch_robotics.environments import EnvDense2DExtraObjects
-from torch_robotics.environments.env_simple_2d_extra_objects import EnvSimple2DExtraObjects
+# from torch_robotics.environments import EnvDense2DExtraObjects
+# from torch_robotics.environments.env_simple_2d_extra_objects import EnvSimple2DExtraObjects
 from torch_robotics.tasks.tasks import PlanningTask
 from torch_robotics.visualizers.planning_visualizer import PlanningVisualizer
 

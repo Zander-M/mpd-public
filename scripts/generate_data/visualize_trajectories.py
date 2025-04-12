@@ -13,7 +13,10 @@ from torch_robotics.tasks.tasks import PlanningTask
 from torch_robotics.torch_utils.torch_utils import DEFAULT_TENSOR_ARGS, to_torch
 from torch_robotics.visualizers.planning_visualizer import PlanningVisualizer
 
-DATA_DIR = '../../data_trajectories/EnvSpheres3D-RobotPanda-cluster/66'
+# DATA_DIR = '../../data_trajectories/EnvSpheres3D-RobotPanda-cluster/66'
+# DATA_DIR = '../../data_trajectories/EnvDense2D-RobotPointMass/51'
+DATA_DIR = '../../data_trajectories/EnvEmpty2D-RobotPlanarDisk/9'
+
 
 tensor_args = DEFAULT_TENSOR_ARGS
 
@@ -76,7 +79,7 @@ plt.show()
 planner_visualizer.animate_robot_trajectories(
     trajs=trajs, start_state=start_state_pos, goal_state=goal_state_pos,
     plot_trajs=True,
-    video_filepath=os.path.join(DATA_DIR, 'robot-traj.mp4'),
+    video_filepath='robot-traj.gif',
     # n_frames=max((2, pos_trajs_iters[-1].shape[1]//10)),
     n_frames=trajs.shape[1],
     anim_time=args['duration']

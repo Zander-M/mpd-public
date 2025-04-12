@@ -17,17 +17,20 @@ from mp_baselines.planners.costs.cost_functions import CostCollision, CostCompos
 from mpd.models import TemporalUnet, UNET_DIM_MULTS
 from mpd.models.diffusion_models.guides import GuideManagerTrajectoriesWithVelocity
 from mpd.models.diffusion_models.sample_functions import guide_gradient_steps, ddpm_sample_fn
-from mpd.models.guides.factor_graph_guide import CollisionAvoidanceGuide
-from mpd.models.guides.monte_carlo_guide import MonteCarloGuide
+
 from mpd.trainer import get_dataset, get_model
 from mpd.utils.loading import load_params_from_yaml
-from torch_robotics.robots import RobotPanda
 from torch_robotics.torch_utils.seed import fix_random_seed
 from torch_robotics.torch_utils.torch_timer import TimerCUDA
 from torch_robotics.torch_utils.torch_utils import get_torch_device, freeze_torch_model_params
 from torch_robotics.trajectory.metrics import compute_smoothness, compute_path_length, compute_variance_waypoints
 from torch_robotics.trajectory.utils import interpolate_traj_via_points
 from torch_robotics.visualizers.planning_visualizer import PlanningVisualizer
+
+
+# Guides
+from mpd.models.guides.factor_graph_guide import CollisionAvoidanceGuide
+from mpd.models.guides.monte_carlo_guide import MonteCarloGuide
 
 allow_ops_in_compiled_graph()
 
@@ -265,7 +268,7 @@ def experiment(
     ) 
     model_step = 1 
 
-    # model_guide = None
+    model_guide = None
 
     ########
     # Sample trajectories with the diffusion/cvae model
