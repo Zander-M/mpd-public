@@ -43,57 +43,96 @@ class GaussianDiffusionFactorModel(GaussianDiffusionModel):
     def run_inference_one_step(self, 
                                trajs_normalized,
                                t,
-                               agent_idx,
+                               agent_idx=None,
                                context=None, hard_conds=None, 
                                n_samples=1, 
                                model_guide=None,
                                model_step=50,
                                **diffusion_kwargs):
         """
-            Run inference for one step for one agent, conditioned on other agent's trajectories
+        Run one denoising step for all agents in batch mode (or one agent if agent_idx is specified).
+        This version flattens (num_agents, num_samples) into a single batch dimension, and applies hard conditions
+        based on trajectory index.
         """
+        import copy
         trajs_normalized = trajs_normalized.clone()
-        traj = trajs_normalized[agent_idx]
 
-        # context and hard_conds must be normalized
-        hard_conds = copy(hard_conds)
-        context = copy(context)
+        if agent_idx is not None:
+            traj = trajs_normalized[agent_idx]
+            hard_conds_agent = copy.copy(hard_conds[agent_idx])
+            context_agent = copy.copy(context[agent_idx]) if context is not None else None
 
-        # repeat hard conditions and contexts for n_samples
-        for k, v in hard_conds.items():
-            new_state = einops.repeat(v, 'd -> b d', b=n_samples)
-            hard_conds[k] = new_state
+            for k, v in hard_conds_agent.items():
+                hard_conds_agent[k] = einops.repeat(v, 'd -> b d', b=n_samples)
+            if context_agent is not None:
+                for k, v in context_agent.items():
+                    context_agent[k] = einops.repeat(v, 'd -> b d', b=n_samples)
 
-        if context is not None:
-            for k, v in context.items():
-                context[k] = einops.repeat(v, 'd -> b d', b=n_samples)
-
-        # Sample from diffusion model
-        samples = self.conditional_sample_one_step(
-            traj, t, hard_conds, context=context, batch_size=n_samples, **diffusion_kwargs
-        )
-
-        # Model Guidance
-        if model_guide is not None:
-            mask = torch.ones(trajs_normalized.shape[0], dtype=bool, device=trajs_normalized.device)
-            mask[agent_idx] = False
-            noisy_trajs_others = trajs_normalized[mask]  # (N-1, B, T, D)
-
-            # prepare variance based on schedule
-            alpha_bar_t = self.alphas_cumprod[t].clone().detach().to(samples.device)
-            alpha_bar_t = torch.tensor(alpha_bar_t, device=samples.device)
-
-            updated_samples = model_guide.infer(
-                noisy_traj_batch=samples,
-                noisy_trajs_others=noisy_trajs_others,
-                alpha_bar_t=alpha_bar_t,
-                factor_steps=model_step, # make this a parameter
+            samples = self.conditional_sample_one_step(
+                traj, t, hard_conds_agent, context=context_agent, batch_size=n_samples, **diffusion_kwargs
             )
-            samples[:] = updated_samples
 
+            if model_guide is not None:
+                mask = torch.ones(trajs_normalized.shape[0], dtype=bool, device=trajs_normalized.device)
+                mask[agent_idx] = False
+                noisy_trajs_others = trajs_normalized[mask]
+                alpha_bar_t = torch.tensor(self.alphas_cumprod[t], device=samples.device)
+                updated_samples = model_guide.infer(
+                    noisy_traj_batch=samples,
+                    noisy_trajs_others=noisy_trajs_others,
+                    alpha_bar_t=alpha_bar_t,
+                    factor_steps=model_step,
+                )
+                samples[:] = updated_samples
 
-        # return the last denoising step
-        return samples
+            return samples
+
+        else:
+            B, N, H, D = trajs_normalized.shape
+            trajs_flat = trajs_normalized.view(B * N, H, D)
+
+            # Create a long list of hard_conds indexed by sample index
+            # Each i-th item in hard_conds_list corresponds to sample i in trajs_flat
+            cond_keys = hard_conds[0].keys()
+            hard_cond_tensor = {
+                k: torch.stack([h[k] for h in hard_conds], dim=0).to(trajs_normalized.device)  # (B, D)
+                for k in cond_keys
+            }
+
+            # Indexing: [i * n_samples + j] corresponds to agent i, sample j
+            cond_dict = {}
+            for k, v in hard_cond_tensor.items():
+                v_exp = einops.repeat(v, 'b d -> (b n) d', n=n_samples)  # shape (B*N, D)
+                cond_dict[k] = v_exp
+
+            # Same for context if provided
+            merged_context = None
+            if context is not None:
+                context_keys = context[0].keys()
+                context_tensor = {
+                    k: torch.stack([c[k] for c in context], dim=0).to(trajs_normalized.device)
+                    for k in context_keys
+                }
+                merged_context = {
+                    k: einops.repeat(v, 'b d -> (b n) d', n=n_samples)
+                    for k, v in context_tensor.items()
+                }
+
+            samples_flat = self.conditional_sample_one_step(
+                trajs_flat, t, cond_dict, context=merged_context, batch_size=B * N, **diffusion_kwargs
+            )
+
+            if model_guide is not None:
+                alpha_bar_t = torch.tensor(self.alphas_cumprod[t], device=samples_flat.device)
+                samples_flat = model_guide.infer(
+                    noisy_traj_batch=samples_flat,
+                    noisy_trajs_others=None,
+                    alpha_bar_t=alpha_bar_t,
+                    factor_steps=model_step,
+                )
+
+            return samples_flat.view(B, N, H, D)
+
 
     @torch.no_grad()
     def conditional_sample_one_step(self, x, t, hard_conds, horizon=None, batch_size=1, **sample_kwargs):

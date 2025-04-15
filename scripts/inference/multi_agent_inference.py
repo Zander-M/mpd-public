@@ -10,6 +10,7 @@ from pathlib import Path
 import einops
 import matplotlib.pyplot as plt
 import torch
+from einops import rearrange
 from einops._torch_specific import allow_ops_in_compiled_graph  # requires einops>=0.6.1
 
 from experiment_launcher import single_experiment_yaml, run_experiment
@@ -42,9 +43,9 @@ TRAINED_MODELS_DIR = '../../data_trained_models/'
 def experiment(
     ########################################################################################################################
     # Experiment configuration
-    model_id: str = 'EnvDense2D-RobotPointMassFactor',
+    # model_id: str = 'EnvDense2D-RobotPointMassFactor',
     # model_id: str = 'EnvNarrowPassageDense2D-RobotPointMassFactor',
-    # model_id: str = 'EnvSimple2D-RobotPointMassFactor',
+    model_id: str = 'EnvSimple2D-RobotPointMassFactor',
 
     # planner_alg: str = 'diffusion_prior',
     # planner_alg: str = 'diffusion_prior_then_guide',
@@ -274,33 +275,37 @@ def experiment(
     # Sample trajectories with the diffusion/cvae model
 
     # Initialize single agent trajectories, iteratively denoise each agent's trajectory
+    # (B, N, H, D)
     trajs_normalized = torch.randn(num_agents, n_samples, n_support_points, dataset.state_dim, **tensor_args)
-    trajs_normalized_iters = [[] for _ in range(num_agents)]
+    trajs_normalized_iters = []
+
     with TimerCUDA() as timer_model_sampling:
         for t in reversed(range(-n_diffusion_steps_without_noise, model.n_diffusion_steps)):
-            for agent_idx in range(num_agents):
-                hard_conds = hard_conds_all[agent_idx]
-
-                # Denoise for one timestep t for agent agent_idx
-                traj_agent_updated = model.run_inference_one_step(
-                    trajs_normalized=trajs_normalized,
-                    t=t,
-                    agent_idx=agent_idx,
-                    context=None, hard_conds=hard_conds,
-                    n_samples=n_samples, horizon=n_support_points,
-                    sample_fn=ddpm_sample_fn,
-                    model_guide=model_guide,
-                    model_step=model_step,
-                    **sample_fn_kwargs,
-                    # ddim=True
-                )
-
-                # Update single agent trajectory
-                trajs_normalized[agent_idx] = traj_agent_updated
-                trajs_normalized_iters[agent_idx].append(traj_agent_updated)
+            trajs_normalized = model.run_inference_one_step(
+                trajs_normalized=trajs_normalized,
+                t=t,
+                agent_idx=None,  # batch mode
+                context=None,
+                hard_conds=hard_conds_all,
+                n_samples=n_samples,
+                horizon=n_support_points,
+                sample_fn=ddpm_sample_fn,
+                model_guide=model_guide,
+                model_step=model_step,
+                **sample_fn_kwargs,
+            )
+            trajs_normalized_iters.append(trajs_normalized.clone())
 
     print(f't_model_sampling: {timer_model_sampling.elapsed:.3f} sec')
     t_total = timer_model_sampling.elapsed
+
+    # Stack over time to get (T, B, N, H, D)
+    trajs_iters_all = torch.stack(
+        [dataset.unnormalize_trajectories(t) for t in trajs_normalized_iters], dim=0
+    )
+
+    # Get positions: (T, B, N, H, 2)
+    trajs_iters_all_agents_pos = robot.get_position(trajs_iters_all)
 
     ########
     # run extra guiding steps without diffusion
@@ -312,7 +317,7 @@ def experiment(
             for i in range(n_post_diffusion_guide_steps):
                 trajs = guide_gradient_steps(
                     trajs,
-                    hard_conds=hard_conds,
+                    hard_conds=hard_conds_all,
                     guide=guide,
                     n_guide_steps=1,
                     unnormalize_data=False
@@ -327,18 +332,13 @@ def experiment(
 
     # unnormalize trajectory samples from the models
     # TODO: collect multi-agent stats here
-    trajs_iters_all =[
-         dataset.unnormalize_trajectories(torch.stack(trajs_normalized_iters[agent_idx]))
-         for agent_idx in range(num_agents)
-    ]
-
-    trajs_iters_all_agents_pos = [
-        robot.get_position(trajs) for trajs in trajs_iters_all
-    ]
-    trajs_iters_all_agents_pos = torch.stack(trajs_iters_all_agents_pos)  
-
 
     # rendering
+    trajs_iters_all_agents_pos = rearrange(trajs_iters_all_agents_pos, 't b n h d -> b t n h d')
+
+    trajs_last = trajs_iters_all_agents_pos[-1, :, 0, :, :]
+    trajs = [traj for traj in trajs_last]
+
     planner_visualizer = PlanningVisualizer(
         task=task
     )
@@ -346,8 +346,6 @@ def experiment(
     plt.show()
     planner_visualizer.animate_opt_iters_multi_robots(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos)
     return
-
-
 
     # Plot all agents' denoising trajectories
 
