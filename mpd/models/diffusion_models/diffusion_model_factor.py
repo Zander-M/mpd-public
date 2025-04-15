@@ -72,7 +72,13 @@ class GaussianDiffusionFactorModel(GaussianDiffusionModel):
                 traj, t, hard_conds_agent, context=context_agent, batch_size=n_samples, **diffusion_kwargs
             )
 
+            # Model-based trajectory refinement
+
             if model_guide is not None:
+                """
+                    TODO: model_guide is passed in as a dict. Depending on the model type,
+                    the solver should handle refinement logic differently.
+                """
                 mask = torch.ones(trajs_normalized.shape[0], dtype=bool, device=trajs_normalized.device)
                 mask[agent_idx] = False
                 noisy_trajs_others = trajs_normalized[mask]
@@ -84,7 +90,6 @@ class GaussianDiffusionFactorModel(GaussianDiffusionModel):
                     factor_steps=model_step,
                 )
                 samples[:] = updated_samples
-
             return samples
 
         else:

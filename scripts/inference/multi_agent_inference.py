@@ -30,7 +30,7 @@ from torch_robotics.visualizers.planning_visualizer import PlanningVisualizer
 
 
 # Guides
-from mpd.models.guides.factor_graph_guide import CollisionAvoidanceGuide
+from mpd.models.guides.factor_graph_pairwise_guide import CollisionAvoidanceGuide
 from mpd.models.guides.monte_carlo_guide import MonteCarloGuide
 
 allow_ops_in_compiled_graph()
@@ -68,6 +68,9 @@ def experiment(
     factor_num_interpolated_points_for_collision: float = 1.5,
 
     trajectory_duration: float = 5.0,  # currently fixed
+    ########################################################################
+    # Guidance Related
+    guidance_model = "FactorPairwise",
 
     ########################################################################
     device: str = 'cuda',
@@ -264,13 +267,19 @@ def experiment(
 
     ######## Initial Factor Guide
     # TODO: implement factor graph based guide here
-    model_guide = MonteCarloGuide(
-        n_support_points, dataset.state_dim, 1e-8
-    ) 
-    model_step = 1 
+    if guidance_model == "FactorPairwise":
+        pass
+    elif guidance_model == "FactorPerAgent":
+        pass
+    elif guidance_model == "MonteCarlo":
+        model_guide = MonteCarloGuide(
+            n_support_points, dataset.state_dim, 1e-8
+        ) 
+        model_step = 1 
+    else:
+        print("No guidance model used.")
 
     model_guide = None
-
     ########
     # Sample trajectories with the diffusion/cvae model
 

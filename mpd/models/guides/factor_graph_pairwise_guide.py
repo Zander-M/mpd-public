@@ -1,5 +1,6 @@
 """
     Factor Graph SVI-based guidance
+    Refine all agent trajectories.
 """
 
 import torch
