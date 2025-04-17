@@ -10,10 +10,11 @@ from experiment_launcher.utils import is_local
 # EXPERIMENT PARAMETERS SETUP
 # SELECT ONE
 
-env_id, robot_id, num_contexts, num_trajectories_per_context, threshold_start_goal_pos, obstacle_cutoff_margin = 'EnvSimple2D', 'RobotPointMass', 500, 20, 1, 0.02
+# env_id, robot_id, num_contexts, num_trajectories_per_context, threshold_start_goal_pos, obstacle_cutoff_margin = 'EnvSimple2D', 'RobotPointMass', 500, 20, 1, 0.02
 # env_id, robot_id, num_contexts, num_trajectories_per_context, threshold_start_goal_pos, obstacle_cutoff_margin = 'EnvNarrowPassageDense2D', 'RobotPointMass', 500, 20, 1, 0.02
 # env_id, robot_id, num_contexts, num_trajectories_per_context, threshold_start_goal_pos, obstacle_cutoff_margin = 'EnvDense2D', 'RobotPointMass', 500, 20, 1, 0.02
 # env_id, robot_id, num_contexts, num_trajectories_per_context, threshold_start_goal_pos, obstacle_cutoff_margin = 'EnvSpheres3D', 'RobotPanda', 500, 20, 1.83, 0.05  # 1.83 = 7 * np.deg2rad(15)
+env_id, robot_id, num_contexts, num_trajectories_per_context, threshold_start_goal_pos, obstacle_cutoff_margin, trajectory_type = 'EnvEmpty2D', 'RobotPointMass', 4096, 1, 1, 0.02, "linear"
 
 
 ########################################################################################################################
@@ -36,7 +37,7 @@ MEMORY_SINGLE_JOB = 12000
 MEMORY_PER_CORE = N_EXPS_IN_PARALLEL * MEMORY_SINGLE_JOB // N_CORES
 PARTITION = 'gpu' if USE_CUDA else 'amd3,amd2,amd'
 GRES = 'gpu:1' if USE_CUDA else None  # gpu:rtx2080:1, gpu:rtx3080:1, gpu:rtx3090:1, gpu:a5000:1
-CONDA_ENV = 'mpd-public'
+CONDA_ENV = 'mpd'
 
 exp_name = f'generate_trajectories'
 
@@ -67,15 +68,12 @@ launcher = Launcher(
 launcher.add_experiment(
     env_id__=env_id,
     robot_id__=robot_id,
-
     num_trajectories=num_trajectories_per_context,
-
     threshold_start_goal_pos=threshold_start_goal_pos,
     obstacle_cutoff_margin=obstacle_cutoff_margin,
-
     device='cuda' if USE_CUDA else 'cpu',
-
     debug=False
+
 )
 
 launcher.run(LOCAL, TEST)

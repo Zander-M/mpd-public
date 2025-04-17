@@ -314,8 +314,6 @@ def generate_linear_trajectories(
     num_trajectories_coll, num_trajectories_free = len(trajs_last_iter_coll), len(trajs_last_iter_free)
     return num_trajectories_coll, num_trajectories_free
 
-
-
 @single_experiment_yaml
 def experiment(
     # env_id: str = 'EnvDense2D',
@@ -413,17 +411,4 @@ def experiment(
 
 if __name__ == '__main__':
     # Generate n linear trajectories. For san check only
-    env_id = "EnvEmpty2D"
-    robot_id = "RobotPointMass"
-    results_dir = os.path.join("data", f"{env_id}-{robot_id}")
-    num_trajectories = 100
-    for i in range(num_trajectories):
-        run_experiment(
-            experiment, 
-            args={
-                "seed":i, 
-                "env_id":env_id, 
-                "robot_id":robot_id, 
-                "results_dir":results_dir
-            }
-            )
+    run_experiment(experiment)
