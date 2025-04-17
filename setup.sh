@@ -10,7 +10,7 @@ fi
 
 export SKLEARN_ALLOW_DEPRECATED_SKLEARN_PACKAGE_INSTALL=True
 
-eval "$(~/miniconda3/bin/conda shell.bash hook)"
+eval "$(conda shell.bash hook)"
 
 
 conda env create -f environment.yml
@@ -47,4 +47,7 @@ conda remove --force ncurses --yes
 
 conda install -c "conda-forge/label/cf202003" gdown --yes
 pip install --upgrade --no-cache-dir gdown
+
+# Suppress complaint by installing numpy 1.23
+conda install numpy==1.23 --yes
 

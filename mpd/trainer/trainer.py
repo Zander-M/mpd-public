@@ -1,3 +1,6 @@
+"""
+    Trainer adapted for accelerate
+"""
 import copy
 from math import ceil
 
@@ -17,11 +20,15 @@ def get_num_epochs(num_train_steps, batch_size, dataset_len):
     return ceil(num_train_steps * batch_size / dataset_len)
 
 
-def save_models_to_disk(models_prefix_l, epoch, total_steps, checkpoints_dir=None):
+def save_models_to_disk(models_prefix_l, epoch, total_steps, checkpoints_dir=None, accelerator=None):
     for model, prefix in models_prefix_l:
         if model is not None:
-            save_model_to_disk(model, epoch, total_steps, checkpoints_dir, prefix=f'{prefix}_')
-            for submodule_key, submodule_value in model.submodules.items():
+            if accelerator:
+                model_to_save = accelerator.unwrap_model(model)
+            else:
+                model_to_save = model
+            save_model_to_disk(model_to_save, epoch, total_steps, checkpoints_dir, prefix=f'{prefix}_')
+            for submodule_key, submodule_value in model_to_save.submodules.items():
                 save_model_to_disk(submodule_value, epoch, total_steps, checkpoints_dir,
                                    prefix=f'{prefix}_{submodule_key}_')
 
@@ -127,10 +134,11 @@ def train(model=None, train_dataloader=None, epochs=None, lr=None, steps_til_sum
           early_stopper_patience=-1,
           debug=False,
           tensor_args=DEFAULT_TENSOR_ARGS,
+          accelerator=None,
           **kwargs
           ):
 
-    print(f'\n------- TRAINING STARTED -------\n')
+    accelerator.print(f'\n------- TRAINING STARTED -------\n')
 
     ema_model = None
     if use_ema:
@@ -143,7 +151,9 @@ def train(model=None, train_dataloader=None, epochs=None, lr=None, steps_til_sum
         optimizers = [torch.optim.Adam(lr=lr, params=model.parameters())]
 
     # Automatic Mixed Precision
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    scaler = None
+    if not accelerator or accelerator.mixed_precision == "no":
+        scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     if val_dataloader is not None:
         assert val_loss_fn is not None, "If validation set is passed, have to pass a validation loss_fn!"
@@ -164,7 +174,7 @@ def train(model=None, train_dataloader=None, epochs=None, lr=None, steps_til_sum
     train_steps_current = 0
 
     # save models before training
-    save_models_to_disk([(model, 'model'), (ema_model, 'ema_model')], 0, 0, checkpoints_dir)
+    save_models_to_disk([(model, 'model'), (ema_model, 'ema_model')], 0, 0, checkpoints_dir, accelerator)
 
     with tqdm(total=len(train_dataloader) * epochs, mininterval=1 if debug else 60) as pbar:
         train_losses_l = []
@@ -179,8 +189,13 @@ def train(model=None, train_dataloader=None, epochs=None, lr=None, steps_til_sum
                     train_batch_dict = dict_to_device(train_batch_dict, tensor_args['device'])
 
                     # Compute losses
-                    with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=use_amp):
-                        train_losses, train_losses_info = loss_fn(model, train_batch_dict, train_subset.dataset)
+                    if accelerator:
+                        with accelerator.autocast():
+                            train_losses, train_losses_info = loss_fn(model, train_batch_dict, train_subset.dataset)
+                    else: 
+                        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=use_amp):
+                            train_losses, train_losses_info = loss_fn(model, train_batch_dict, train_subset.dataset)
+                       
 
                     train_loss_batch = 0.
                     train_losses_log = {}
@@ -193,11 +208,11 @@ def train(model=None, train_dataloader=None, epochs=None, lr=None, steps_til_sum
                 # SUMMARY
                 if train_steps_current % steps_til_summary == 0:
                     # TRAINING
-                    print(f"\n-----------------------------------------")
-                    print(f"train_steps_current: {train_steps_current}")
-                    print(f"t_training_loss: {t_training_loss.elapsed:.4f} sec")
-                    print(f"Total training loss {train_loss_batch:.4f}")
-                    print(f"Training losses {train_losses}")
+                    accelerator.print(f"\n-----------------------------------------")
+                    accelerator.print(f"train_steps_current: {train_steps_current}")
+                    accelerator.print(f"t_training_loss: {t_training_loss.elapsed:.4f} sec")
+                    accelerator.print(f"Total training loss {train_loss_batch:.4f}")
+                    accelerator.print(f"Training losses {train_losses}")
 
                     train_losses_l.append((train_steps_current, train_losses_log))
 
@@ -213,14 +228,14 @@ def train(model=None, train_dataloader=None, epochs=None, lr=None, steps_til_sum
                             debug=debug,
                             tensor_args=tensor_args
                         )
-                    print(f"t_training_summary: {t_training_summary.elapsed:.4f} sec")
+                    accelerator.print(f"t_training_summary: {t_training_summary.elapsed:.4f} sec")
 
                     ################################################################################################
                     # VALIDATION LOSS and SUMMARY
                     validation_losses_log = {}
                     if val_dataloader is not None:
                         with TimerCUDA() as t_validation_loss:
-                            print("Running validation...")
+                            accelerator.print("Running validation...")
                             val_losses = defaultdict(list)
                             total_val_loss = 0.
                             for step_val, batch_dict_val in enumerate(val_dataloader):
@@ -239,10 +254,10 @@ def train(model=None, train_dataloader=None, epochs=None, lr=None, steps_til_sum
                             for loss_name, loss in val_losses.items():
                                 single_loss = np.mean(loss).item()
                                 validation_losses[f'VALIDATION {loss_name}'] = single_loss
-                            print("... finished validation.")
+                            accelerator.print("... finished validation.")
 
-                        print(f"t_validation_loss: {t_validation_loss.elapsed:.4f} sec")
-                        print(f"Validation losses {validation_losses}")
+                        accelerator.print(f"t_validation_loss: {t_validation_loss.elapsed:.4f} sec")
+                        accelerator.print(f"Validation losses {validation_losses}")
 
                         validation_losses_log = validation_losses
                         validation_losses_l.append((train_steps_current, validation_losses_log))
@@ -260,14 +275,14 @@ def train(model=None, train_dataloader=None, epochs=None, lr=None, steps_til_sum
                                 debug=debug,
                                 tensor_args=tensor_args
                             )
-                        print(f"t_valididation_summary: {t_validation_summary.elapsed:.4f} sec")
+                        accelerator.print(f"t_valididation_summary: {t_validation_summary.elapsed:.4f} sec")
 
                     wandb.log({**train_losses_log, **validation_losses_log}, step=train_steps_current)
 
                 ####################################################################################################
                 # Early stopping
                 if early_stopper.early_stop(total_val_loss):
-                    print(f'Early stopped training at {train_steps_current} steps.')
+                    accelerator.print(f'Early stopped training at {train_steps_current} steps.')
                     stop_training = True
 
                 ####################################################################################################
@@ -276,20 +291,34 @@ def train(model=None, train_dataloader=None, epochs=None, lr=None, steps_til_sum
                     for optim in optimizers:
                         optim.zero_grad()
 
-                    scaler.scale(train_loss_batch).backward()
+                    if accelerator:
+                        accelerator.backward(train_loss_batch)
+                    else:
+                        if scaler:
+                            scaler.scale(train_loss_batch).backward()
+                        else:
+                            train_loss_batch.backward()
 
                     if clip_grad:
-                        for optim in optimizers:
-                            scaler.unscale_(optim)
+                        if accelerator:
+                            accelerator.clip_grad_norm_(model.parameters(), max_norm=clip_grad_max_norm)
+                        else:
+                            if scaler:
+                                for optim in optimizers:
+                                    scaler.unscale_(optim)
                         torch.nn.utils.clip_grad_norm_(
                             model.parameters(),
                             max_norm=clip_grad_max_norm if isinstance(clip_grad, bool) else clip_grad
                         )
 
                     for optim in optimizers:
-                        scaler.step(optim)
+                        if scaler:
+                            scaler.step(optim)
+                        else:
+                            optim.step()
 
-                    scaler.update()
+                    if scaler:
+                        scaler.update()
 
                     if ema_model is not None:
                         if train_steps_current % update_ema_every == 0:
@@ -300,7 +329,10 @@ def train(model=None, train_dataloader=None, epochs=None, lr=None, steps_til_sum
                             ema.update_model_average(ema_model, model)
 
                 if train_steps_current % steps_til_summary == 0:
-                    print(f"t_training_optimization: {t_training_optimization.elapsed:.4f} sec")
+                    if accelerator:
+                        accelerator.print(f"t_training_optimization: {t_training_optimization.elapsed:.4f} sec")
+                    else:
+                        accelerator.print(f"t_training_optimization: {t_training_optimization.elapsed:.4f} sec")
 
                 ####################################################################################################
                 # SAVING
@@ -310,7 +342,7 @@ def train(model=None, train_dataloader=None, epochs=None, lr=None, steps_til_sum
 
                 if (steps_til_checkpoint is not None) and (train_steps_current % steps_til_checkpoint == 0):
                     save_models_to_disk([(model, 'model'), (ema_model, 'ema_model')],
-                                        epoch, train_steps_current, checkpoints_dir)
+                                        epoch, train_steps_current, checkpoints_dir, accelerator)
                     save_losses_to_disk(train_losses_l, validation_losses_l, checkpoints_dir)
 
                 if stop_training or (max_steps is not None and train_steps_current == max_steps):
@@ -329,7 +361,7 @@ def train(model=None, train_dataloader=None, epochs=None, lr=None, steps_til_sum
 
         # Save model at end of training
         save_models_to_disk([(model, 'model'), (ema_model, 'ema_model')],
-                            epoch, train_steps_current, checkpoints_dir)
+                            epoch, train_steps_current, checkpoints_dir, accelerator)
         save_losses_to_disk(train_losses_l, validation_losses_l, checkpoints_dir)
 
-        print(f'\n------- TRAINING FINISHED -------')
+        accelerator.print(f'\n------- TRAINING FINISHED -------')

@@ -6,6 +6,7 @@ import wandb
 
 from mpd.models import build_context
 from mpd.summaries.summary_base import SummaryBase
+from mpd.utils import unwrap_model
 
 
 class SummaryTrajectoryGeneration(SummaryBase):
@@ -23,7 +24,8 @@ class SummaryTrajectoryGeneration(SummaryBase):
         task_id = dataset.map_trajectory_id_to_task_id[trajectory_id]
 
         data_normalized = dataset[trajectory_id]
-        context = build_context(model, dataset, data_normalized)
+        model_unwrapped = unwrap_model(model)
+        context = build_context(model_unwrapped, dataset, data_normalized)
 
         # ------------------------------------------------------------------------------------
         # Sample trajectories with the diffusion/cvae model
@@ -31,7 +33,7 @@ class SummaryTrajectoryGeneration(SummaryBase):
         horizon = dataset.n_support_points
         hard_conds = data_normalized['hard_conds']
 
-        trajs_normalized = model.run_inference(
+        trajs_normalized = model_unwrapped.run_inference(
             context, hard_conds,
             n_samples=n_samples, horizon=horizon,
             deterministic_steps=0
