@@ -1,8 +1,3 @@
-"""
-    Factor Graph SVI-based guidance
-    Refine one agent's trajectory based on other agents trajectoies
-"""
-
 import torch
 import pyro
 import pyro.distributions as dist
@@ -18,9 +13,12 @@ class PerAgentRefiner(PyroModule):
         self.sigma = sigma
         self.lr = lr
         self.steps = steps
-        self.optimizers = {}  # per-agent SVI objects
-        self.guides = {}      # per-agent guides
+        self.optimizers = {}
+        self.guides = {}
         self.initialized = {}
+
+    def collision_weight_schedule(self, alpha_bar, exponent=2.0):
+        return alpha_bar ** exponent
 
     def init(self, B, agent_idx):
         class Guide(PyroModule):
@@ -36,22 +34,26 @@ class PerAgentRefiner(PyroModule):
         def make_model(agent_idx):
             def model(starts, goals, others_fixed):
                 interp = torch.linspace(0, 1, self.T).view(1, self.T, 1).to(starts.device)
+
                 with pyro.plate("batch", B):
                     mu = (1 - interp) * starts[:, agent_idx].unsqueeze(1) + interp * goals[:, agent_idx].unsqueeze(1)
                     x = pyro.sample("x", dist.Normal(mu, 1.0).to_event(2))
+
                     for j in range(self.N):
                         if j == agent_idx:
                             continue
                         xj = others_fixed[:, j]  # shape: (B, T, D)
-                        dists_sq = ((x - xj) ** 2).sum(dim=-1)
-                        penalty = -dists_sq.sum(dim=-1) / (2 * self.sigma ** 2)
+                        dists_sq = ((x - xj) ** 2).sum(dim=-1)  # (B, T)
+                        penalty = -penalty_weight * dists_sq.sum(dim=-1) / (2 * self.sigma ** 2)
                         pyro.factor(f"collision_{agent_idx}_{j}", penalty)
+
             return model
 
         guide = Guide(B, self.T, self.D)
-        model = make_model(agent_idx)
-        svi = SVI(model, guide, ClippedAdam({"lr": self.lr}), loss=Trace_ELBO())
+        self.model_fns = self.model_fns if hasattr(self, 'model_fns') else {}
+        self.model_fns[agent_idx] = make_model(agent_idx)
 
+        svi = SVI(self.model_fns[agent_idx], guide, ClippedAdam({"lr": self.lr}), loss=Trace_ELBO())
         self.guides[agent_idx] = guide
         self.optimizers[agent_idx] = svi
         self.initialized[agent_idx] = True
@@ -65,18 +67,37 @@ class PerAgentRefiner(PyroModule):
         B = X_noisy.shape[0]
         starts = X_noisy[:, :, 0, :]
         goals = X_noisy[:, :, -1, :]
-        others_fixed = X_noisy.detach()  # treat others as fixed
+        others_fixed = X_noisy.detach()
 
         if agent_idx not in self.initialized:
             self.init(B, agent_idx)
 
-        svi = self.optimizers[agent_idx]
-        guide = self.guides[agent_idx]
+        penalty_weight = self.collision_weight_schedule(alpha_bar)
+
+        # Patch the model with updated penalty weight for this call
+        def make_model_with_weight(agent_idx, penalty_weight):
+            def model(starts, goals, others_fixed):
+                interp = torch.linspace(0, 1, self.T).view(1, self.T, 1).to(starts.device)
+
+                with pyro.plate("batch", B):
+                    mu = (1 - interp) * starts[:, agent_idx].unsqueeze(1) + interp * goals[:, agent_idx].unsqueeze(1)
+                    x = pyro.sample("x", dist.Normal(mu, 1.0).to_event(2))
+
+                    for j in range(self.N):
+                        if j == agent_idx:
+                            continue
+                        xj = others_fixed[:, j]
+                        dists_sq = ((x - xj) ** 2).sum(dim=-1)
+                        penalty = -penalty_weight * dists_sq.sum(dim=-1) / (2 * self.sigma ** 2)
+                        pyro.factor(f"collision_{agent_idx}_{j}", penalty)
+            return model
+
+        svi = SVI(make_model_with_weight(agent_idx, penalty_weight), self.guides[agent_idx], ClippedAdam({"lr": self.lr}), loss=Trace_ELBO())
 
         for _ in range(self.steps):
             svi.step(starts, goals, others_fixed)
 
-        refined_agent = guide.means.detach()  # (B, T, D)
+        refined_agent = self.guides[agent_idx].means.detach()
         refined_all = X_noisy.clone()
         blend = 1.0 - alpha_strength * (1.0 - alpha_bar)
         refined_all[:, agent_idx] = blend * X_noisy[:, agent_idx] + (1 - blend) * refined_agent
