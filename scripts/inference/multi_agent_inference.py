@@ -30,8 +30,7 @@ from torch_robotics.visualizers.planning_visualizer import PlanningVisualizer
 
 
 # Guides
-# from mpd.models.guides.factor_graph_pairwise_guide import CollisionAvoidanceGuide
-# from mpd.models.guides.monte_carlo_guide import MonteCarloGuide
+from mpd.models.guides import FactorGuideSingleAgent, FactorGuideCentralized
 
 allow_ops_in_compiled_graph()
 
@@ -45,7 +44,8 @@ def experiment(
     # Experiment configuration
     # model_id: str = 'EnvDense2D-RobotPointMassFactor',
     # model_id: str = 'EnvNarrowPassageDense2D-RobotPointMassFactor',
-    model_id: str = 'EnvSimple2D-RobotPointMassFactor',
+    # model_id: str = 'EnvSimple2D-RobotPointMassFactor',
+    model_id: str = 'EnvEmpty2D-RobotPointMass',
 
     # planner_alg: str = 'diffusion_prior',
     # planner_alg: str = 'diffusion_prior_then_guide',
@@ -54,9 +54,9 @@ def experiment(
     use_guide_on_extra_objects_only: bool = False,
 
     # num_agents: int = 1, # sanity check
-    num_agents: int = 8, # number of agents
+    num_agents: int = 2, # number of agents
 
-    n_samples: int = 50,
+    n_samples: int = 10,
 
     start_guide_steps_fraction: float = 0.25,
     n_guide_steps: int = 5,
@@ -70,14 +70,14 @@ def experiment(
     trajectory_duration: float = 5.0,  # currently fixed
     ########################################################################
     # Guidance Related
-    guidance_model: str = "FactorPairwise",
+    guidance_model: str = "FactorGuideSingleAgent",
 
     ########################################################################
     device: str = 'cuda',
 
     debug: bool = True,
 
-    render: bool = False,
+    render: bool = True,
 
     ########################################################################
     # MANDATORY
@@ -119,7 +119,7 @@ def experiment(
     # Load dataset with env, robot, task
     train_subset, train_dataloader, val_subset, val_dataloader = get_dataset(
         dataset_class='TrajectoryDataset',
-        use_extra_objects=True,
+        use_extra_objects=False,
         obstacle_cutoff_margin=0.05,
         **args,
         tensor_args=tensor_args
@@ -171,31 +171,47 @@ def experiment(
     model.warmup(horizon=n_support_points, device=device)
 
     ########################################################################################################################
-    # Random initial and final positions for each agent
     start_goal_pairs = []
-    for agent_idx in range(num_agents):
-        n_tries = 100
-        start, goal= None, None
-        for _ in range(n_tries):
-            q_free = task.random_coll_free_q(n_samples=2)
-            start = q_free[0]
-            goal = q_free[1]
+    start_goal_type = "CIRCULAR" # "CIRCULAR" or "RANDOM"
 
-            if torch.linalg.norm(start - goal) > dataset.threshold_start_goal_pos:
-                start_goal_pairs.append((start, goal))
-                break
+    # Random start and final positions for each agent
+    if start_goal_type == "CIRCULAR":
+            # Circular initialization for testing in empty space
+            radius = 0.8
+            start_rad = torch.arange(0, 2*torch.pi, 2*torch.pi/num_agents)
+            goal_rad = start_rad + torch.pi
+            starts = torch.stack([torch.cos(start_rad)*radius, torch.sin(start_rad)*radius]).T
+            goals = torch.stack([torch.cos(goal_rad)*radius, torch.sin(goal_rad)*radius]).T
+            start_goal_pairs = [(start, goal) for (start, goal) in zip(starts, goals)]
+            start_goal_tensor = torch.stack(
+                [torch.stack([start, goal]) for (start, goal) in start_goal_pairs]
+            ).to(device)
+    else:
+        # Default behavior is random collision free start and goal 
+        for agent_rad in range(num_agents):
+            n_tries = 100
+            start, goal= None, None
+            for _ in range(n_tries):
+                q_free = task.random_coll_free_q(n_samples=2)
+                start = q_free[0]
+                goal = q_free[1]
 
-        if start is None or goal is None:
-            raise ValueError(f"Agent {agent_idx} failed to find colilsion free start/goal")
+                if torch.linalg.norm(start - goal) > dataset.threshold_start_goal_pos:
+                    start_goal_pairs.append((start, goal))
+                    break
+
+            if start is None or goal is None:
+                raise ValueError(f"Agent {agent_rad} failed to find colilsion free start/goal")
+        
+        start_goal_tensor = torch.stack(
+            [torch.stack([start, goal]) for (start, goal) in start_goal_pairs]
+        )
 
     ########################################################################################################################
     # Run motion planning inference
 
     ########
     # normalize start and goal positions
-    start_goal_tensor = torch.stack(
-        [torch.stack([start, goal]) for (start, goal) in start_goal_pairs]
-    )
 
     hard_conds_all = [
         dataset.get_hard_conditions(start_goal_tensor[i], normalize=True)
@@ -259,7 +275,8 @@ def experiment(
 
     t_start_guide = ceil(start_guide_steps_fraction * model.n_diffusion_steps)
     sample_fn_kwargs = dict(
-        guide=None if run_prior_then_guidance or run_prior_only else guide,
+        guide = None, # No guide
+        # guide=None if run_prior_then_guidance or run_prior_only else guide,
         n_guide_steps=n_guide_steps,
         t_start_guide=t_start_guide,
         noise_std_extra_schedule_fn=lambda x: 0.5,
@@ -267,10 +284,44 @@ def experiment(
 
     ######## Initial Factor Guide
     # TODO: implement factor graph based guide here
-    if guidance_model == "FactorPairwise":
-        pass
-    elif guidance_model == "FactorPerAgent":
-        pass
+    if guidance_model == "FactorGuideSingleAgent":
+        print("Using Factor Guide Single Agent")
+
+        # Guide params
+            
+        collision_threshold = 1 
+        sigma = {
+           "position_factor": 1e-2,
+           "collision_factor": 1e-2
+        }
+        lr = 1e-3 
+        steps = 1000
+
+        model_guide = FactorGuideSingleAgent(n_samples, num_agents, n_support_points, dataset.state_dim, device,
+                                    collision_threshold=collision_threshold,
+                                    sigma=sigma,
+                                    lr=lr,
+                                    steps=steps
+                                  )
+    elif guidance_model == "FactorGuideCentralized":
+        print("Using Factor Guide Centralized")
+
+        # Guide params
+            
+        collision_threshold = 0.2
+        sigma = {
+           "position_factor": 1e-8,
+           "collision_factor": 1e-8
+        }
+        lr = 1e-4 
+        steps = 100
+
+        model_guide = FactorGuideCentralized(n_samples, num_agents, n_support_points, dataset.state_dim, device,
+                                    collision_threshold=collision_threshold,
+                                    sigma=sigma,
+                                    lr=lr,
+                                    steps=steps
+                                  )       
     elif guidance_model == "MonteCarlo":
         pass
         # model_guide = MonteCarloGuide(
@@ -279,14 +330,13 @@ def experiment(
         # model_step = 1 
     else:
         print("No guidance model used.")
-
-    model_guide = None
+        model_guide = None
     ########
     # Sample trajectories with the diffusion/cvae model
 
     # Initialize single agent trajectories, iteratively denoise each agent's trajectory
     # (B, N, H, D)
-    trajs_normalized = torch.randn(num_agents, n_samples, n_support_points, dataset.state_dim, **tensor_args)
+    trajs_normalized = torch.randn(n_samples, num_agents, n_support_points, dataset.state_dim, **tensor_args)
     trajs_normalized_iters = []
 
     with TimerCUDA() as timer_model_sampling:
@@ -294,7 +344,6 @@ def experiment(
             trajs_normalized = model.run_inference_one_step(
                 trajs_normalized=trajs_normalized,
                 t=t,
-                agent_idx=None,  # batch mode
                 context=None,
                 hard_conds=hard_conds_all,
                 n_samples=n_samples,
@@ -343,18 +392,17 @@ def experiment(
     # TODO: collect multi-agent stats here
 
     # rendering
-    trajs_iters_all_agents_pos = rearrange(trajs_iters_all_agents_pos, 't b n h d -> b t n h d')
-
-    trajs_last = trajs_iters_all_agents_pos[-1, :, 0, :, :]
-    trajs = [traj for traj in trajs_last]
-
-    planner_visualizer = PlanningVisualizer(
-        task=task
-    )
-    planner_visualizer.render_multi_robot_trajectories(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos)
-    plt.show()
-    planner_visualizer.animate_opt_iters_multi_robots(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos)
-    return
+    if render: 
+        trajs_iters_all_agents_pos = rearrange(trajs_iters_all_agents_pos, 't b n h d -> b t n h d')
+        print(trajs_iters_all_agents_pos.shape)
+        planner_visualizer = PlanningVisualizer(
+            task=task
+        )
+        planner_visualizer.render_multi_robot_trajectories(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos)
+        plt.savefig("final_trajectory.png")
+        plt.close()
+        planner_visualizer.animate_opt_iters_multi_robots(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos)
+    return 
 
     # Plot all agents' denoising trajectories
 

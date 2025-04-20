@@ -15,7 +15,7 @@ from torch_robotics.visualizers.planning_visualizer import PlanningVisualizer
 
 # DATA_DIR = '../../data_trajectories/EnvSpheres3D-RobotPanda-cluster/66'
 # DATA_DIR = '../../data_trajectories/EnvDense2D-RobotPointMass/51'
-DATA_DIR = '../../data_trajectories/EnvEmpty2D-RobotPlanarDisk/9'
+DATA_DIR = '../../data_trajectories/EnvEmpty2D-RobotPointMass/12'
 
 
 tensor_args = DEFAULT_TENSOR_ARGS
@@ -43,7 +43,7 @@ robot = robot_class(
 task = PlanningTask(
     env=env,
     robot=robot,
-    obstacle_cutoff_margin=args['obstacle_cutoff_margin'],
+    # obstacle_cutoff_margin=args['obstacle_cutoff_margin'],
     tensor_args=tensor_args
 )
 
