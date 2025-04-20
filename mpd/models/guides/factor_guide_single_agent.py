@@ -4,12 +4,15 @@
 """
 
 import torch
+from torch import nn
 import pyro
 import pyro.distributions as dist 
 from pyro.distributions import constraints
 from pyro.infer import SVI, Trace_ELBO
 from pyro.nn import PyroModule, PyroParam
 from pyro.optim import ClippedAdam
+from pyro import poutine
+from pyro.poutine import trace # debug
 
 # Guide 
 
@@ -18,25 +21,17 @@ class Guide(PyroModule):
         Guide for SVI. 
         We use the noisy trajectory of the agent as the guide
     """
-    def __init__(self, B, H, D, device):
+    def __init__(self, X_noisy, agent_idx):
         super().__init__()
-        self.B = B
-        self.H = H
-        self.D = D
-        self.device = device
+
+        self.B, _, self.H, self.D = X_noisy.shape
+        self.agent_idx = agent_idx
+        self.device = X_noisy.device
 
         # Place Holders
-        self.loc = PyroParam(torch.zeros(B, H, D, device=device, requires_grad=True))
-        self.scales = PyroParam(torch.full((B, H, D), 1.0, device=self.device, requires_grad=True),
-                                    constraint=constraints.greater_than(-10))
-
-    def update_guide(self, X_noisy, agent_idx):
-        """
-            Update Guide with new input values
-        """
-        # Declare parameters to optimize
-        with torch.no_grad():
-            self.loc.data.copy_(X_noisy[:, agent_idx])
+        self.loc = PyroParam(torch.zeros(self.B, self.H-2, self.D, device=self.device, requires_grad=True))
+        self.scales = PyroParam(torch.full((self.B, self.H-2, self.D), 1.0, device=self.device, requires_grad=True),
+                                    constraint=constraints.positive)
 
     def forward(self, *args, **kwargs):
 
@@ -44,7 +39,7 @@ class Guide(PyroModule):
 
         # Use initial noisy trajectory as sampling guide
         with pyro.plate("batch", self.B):
-            pyro.sample("X", dist.Normal(self.loc, self.scales).to_event(2))
+            pyro.sample("z", dist.Normal(self.loc, self.scales).to_event(2))
 
 # Model
 
@@ -55,8 +50,7 @@ class FactorModel(PyroModule):
             Start-Goal Postion Factor
             Collision constriants avoidance Factor
     """
-    def __init__(self, B, N, H, D, 
-                 device,
+    def __init__(self, X_noisy, agent_idx, alpha_bar,
                  collision_threshold=0.02,
                  sigma={ 
                     "position_factor":0.01, 
@@ -66,85 +60,57 @@ class FactorModel(PyroModule):
             initializing place holders for input values.
         """
         super().__init__()
-        self.B = B # batch size
-        self.N = N # num_agents
-        self.H = H # horizon
-        self.D = D # action dim
-        self.device = device
-        self.curr_trajectory = None
-        self.starts = None
-        self.goals = None
-        self.agent_idx = None
-        self.alpha_bar = None
+        self.X_noisy = X_noisy
+        self.B, self.N, self.H, self.D = X_noisy.shape
+        self.device = X_noisy.device
+        self.curr_trajectory = X_noisy[:, agent_idx]
+        self.agent_idx = agent_idx
+        self.starts = self.curr_trajectory[:, 0] # (B, D)
+        self.goals = self.curr_trajectory[:, -1] # (B, D)
+        self.alpha_bar = alpha_bar
 
         self.collision_threshold = collision_threshold # collision threshold
         self.sigma = sigma # penalty strength for each factor
 
-    def update_model(self, X_noisy, agent_idx, alpha_bar):
-        """
-            Update model and guide based on current input
-        """
-        self.agent_idx = agent_idx
-        self.B, self.N, self.H, self.D = X_noisy.shape
-        self.X_noisy = X_noisy
-        self.curr_trajectory = X_noisy[:, agent_idx]
-        self.starts = self.curr_trajectory[:, 0] # (B, D)
-        self.goals = self.curr_trajectory[:, -1] # (B, D)
-        self.alpha_bar = alpha_bar
-    
     def forward(self, *args, **kwargs):
         with pyro.plate("batch", self.B):
 
-            # We propose a linear interpolation between start and goal as the model
-            interp = torch.linspace(0, 1, self.H, device=self.device).view(1, self.H, 1)
-            mu = (1 - interp) * self.starts.unsqueeze(1) + interp * self.goals.unsqueeze(1)
-            scale = torch.ones_like(mu, device=self.device)
-            x = pyro.sample("X", dist.Normal(mu, scale).to_event(2))
-            # x = pyro.sample("x", dist.Normal(torch.zeros(self.B, self.H, self.D, device=self.device),
-                                            #  torch.ones(self.B, self.H, self.D, device=self.device))
-                            # .to_event(2))
-
-            # x = pyro.sample("x", dist.Normal(self.curr_trajectory, 1.0).to_event(2))
-
-            # Start/Goal position Factor
-            penalty = -(((x[:, 0]-self.starts)**2).sum(dim=-1) +
-                ((x[:, -1]-self.goals)**2).sum(dim=-1)
-                ) / (2 * self.sigma["position_factor"] ** 2) # (B)
-            pyro.factor(f"position", penalty)
+            # Force the start and goal position
+            z = pyro.sample(
+                "z",
+                dist.Normal(torch.zeros((self.B, self.H-2, self.D), device=self.device), 
+                            torch.ones((self.B, self.H-2, self.D), device=self.device)).to_event(2)
+            )
+            x = torch.cat([
+                self.starts.unsqueeze(1),
+                z,
+                self.goals.unsqueeze(1)
+            ], dim=1)
 
             # Collision Avoidance Factor
-            for j in range(self.N):
+            xi = x.unsqueeze(1) # (B, 1, H, D)
+            xj = self.X_noisy   # (B, N, H, D)
+            dists_sq = ((xi - xj) ** 2).sum(dim=-1)  # (B, N, H)
+            repulsion = torch.exp(-dists_sq/(2* self.sigma["collision_factor"] ** 2))
+            mask = (dists_sq< self.collision_threshold**2).float()
+            penalty_terms = repulsion*mask # (B, N, H)
 
-                # Skip the factor if agent index matches
-                if j == self.agent_idx:
-                    penalty = torch.zeros((self.B), device=self.device) # (B)
-                    pyro.factor(f"collision_{self.agent_idx}_{j}", penalty)
-                else:
-                    xj = self.X_noisy[:, j]  # shape: (B, H, D)
-                    dists_sq = ((x - xj) ** 2).sum(dim=-1)  # (B, H)
+            # Mask self collision
+            agent_mask = torch.ones(self.N, device=self.device)
+            agent_mask[self.agent_idx] = 0.0
+            penalty_terms = penalty_terms * agent_mask.view(1, self.N, 1) # (B, N, H)
+            penalty = -self.alpha_bar * penalty_terms.sum(dim=[1, 2]) # (B,)
 
-                    # Repulsion & distance mask
-                    repulsion = torch.exp(-dists_sq/(2* self.sigma["collision_factor"] ** 2))
-                    mask = (dists_sq < self.collision_threshold ** 2).float()
-
-                    # Apply Gaussian repulsion only when agents are too close
-                    penalty_terms = repulsion * mask
-
-                    # We inject alpha_bar here. The ealier in the denoising steps, the softer the penalty is.
-                    penalty = - self.alpha_bar *penalty_terms.sum(dim=-1) # (B) 
-                    pyro.factor(f"collision_{self.agent_idx}_{j}", penalty)
-                if not torch.isfinite(penalty).all():
-                    raise RuntimeError(f"Invalid penalty at agent {self.agent_idx}, j={j}")
-
+            pyro.factor(f"collsion_{self.agent_idx}", penalty)
         
 # Module 
-class FactorGuideSingleAgent(PyroModule):
+class FactorGuideSingleAgent:
     """
         Factor Guidance Model that refines the trajectory for each agent.
         We condition each agent's trajectory based on other agents' trajectories.
     """
     def __init__(self, B, N, H, D, device, 
-                 collision_threshold = 0.2,
+                 collision_threshold = 0.2 ,
                  sigma=
                  {
                     "position_factor": 0.02,
@@ -152,7 +118,6 @@ class FactorGuideSingleAgent(PyroModule):
                  }, 
                  lr=1e-8, steps=10):
 
-        super().__init__()
         self.B = B # batch size
         self.N = N # num agent
         self.H = H # horizon
@@ -164,20 +129,17 @@ class FactorGuideSingleAgent(PyroModule):
         self.steps = steps
 
         # Initialize model and guide 
-        self.model = FactorModel(B, N, H, D, device, 
-                                 collision_threshold=collision_threshold, sigma=sigma)
-        self.guide = Guide(B, H, D, device) 
-        self.optimizer = SVI(self.model, self.guide, ClippedAdam({"lr": self.lr}), loss=Trace_ELBO())
+        self.model = None
+        self.guide = None
+        self.optimizer = None
 
     def update_inputs(self, X_noisy, agent_idx, alpha_bar):
         """
             Update current model and guidance based on new input
         """
-        self.model = FactorModel(self.B, self.N, self.H, self.D, self.device, 
+        self.model = FactorModel(X_noisy=X_noisy, agent_idx=agent_idx, alpha_bar=alpha_bar,
                                  collision_threshold=self.collision_threshold, sigma=self.sigma)
-        self.guide = Guide(self.B, self.H, self.D, self.device) 
-        self.model.update_model(X_noisy=X_noisy, agent_idx=agent_idx, alpha_bar=alpha_bar)
-        self.guide.update_guide(X_noisy=X_noisy, agent_idx=agent_idx)
+        self.guide = Guide(X_noisy=X_noisy, agent_idx=agent_idx) 
         self.optimizer = SVI(self.model, self.guide, ClippedAdam({"lr": self.lr}), loss=Trace_ELBO())
 
     def forward(self, X_noisy, alpha_bar):
@@ -188,22 +150,21 @@ class FactorGuideSingleAgent(PyroModule):
         num_agents = X_noisy.shape[1]
         X_refined = X_noisy.clone().detach()
         alpha_bar = torch.clamp(alpha_bar, 0.0, 1.0).clone().detach()
-        # blend = torch.exp(-alpha_bar**2)
+        blend = torch.exp(-alpha_bar**2)
 
         for agent_idx in range(num_agents):
             self.update_inputs(X_noisy=X_noisy, agent_idx=agent_idx, alpha_bar=alpha_bar)
+            starts = X_noisy[:, agent_idx, 0]
+            goals = X_noisy[:, agent_idx, -1]
             for step in range(self.steps):
                 loss = self.optimizer.step()
-                if step % 100 == 0:
-                    print(f"Step {step} : loss = {loss}")
-            
             refined_paths = self.guide.loc.detach()
-            
-            print("Delta norm: ", torch.norm(self.guide.loc.detach() - X_noisy[:, agent_idx]))
-
-            # Clipping merge factor, for overflow prevention
-            # refined_all[:, agent_idx] = blend * X_noisy[:, agent_idx] + (1 - blend) * refined_paths
-            X_refined[:, agent_idx] = refined_paths
+            refined_paths = torch.cat([
+                starts.unsqueeze(1),
+                refined_paths,
+                goals.unsqueeze(1)
+            ], dim=1)
+            X_refined[:, agent_idx] = blend * X_noisy[:, agent_idx] + (1 - blend) * refined_paths
         return X_refined
 
     ## Utils
@@ -223,3 +184,38 @@ class FactorGuideSingleAgent(PyroModule):
             "mean_start_change": start_change.cpu().numpy(),
             "mean_goal_change": goal_change.cpu().numpy(),
         }
+
+if __name__ == "__main__":
+    # simple visual check to make sure the model is ok
+    from pyro import poutine
+    from pyro.contrib.autoname import scope
+    from pyro.contrib.autoname import name_count  # for unique names
+    from pyro import render_model
+
+    device = "cpu"
+    B = 10
+    N = 2
+    H = 64
+    D = 4
+    # Example: dummy inputs
+    x_noisy = torch.randn(B, N, H, D, device=device)
+    alpha_bar = torch.tensor(0.5, device=device)
+
+    model = FactorModel(B, H, H, D, device)
+    guide = Guide(B, H, D, device=device)
+
+    # Update model and guide with these inputs
+    model.update_model(x_noisy, agent_idx=0, alpha_bar=alpha_bar)
+    guide.update_guide(x_noisy, agent_idx=0)
+
+    # Wrap model and guide calls in `poutine.trace`
+    guide_trace = poutine.trace(guide).get_trace()
+    model_trace = poutine.trace(poutine.replay(model, trace=guide_trace)).get_trace()
+
+    # Render the graphical model
+    render_model(
+        model=model,
+        model_args=(),
+        model_kwargs={},
+        filename="model_graph.svg"
+    )
