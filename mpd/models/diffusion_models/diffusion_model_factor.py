@@ -43,11 +43,10 @@ class GaussianDiffusionFactorModel(GaussianDiffusionModel):
     def run_inference_one_step(self, 
                                trajs_normalized,
                                t,
-                               agent_idx=None,
                                context=None, hard_conds=None, 
                                n_samples=1, 
                                model_guide=None,
-                               model_step=50,
+                               debug=False,
                                **diffusion_kwargs):
         """
         Run one denoising step for all agents in batch mode (or one agent if agent_idx is specified).
@@ -88,7 +87,7 @@ class GaussianDiffusionFactorModel(GaussianDiffusionModel):
 
         samples_flat = self.conditional_sample_one_step(
             trajs_flat, t, cond_dict, context=merged_context, batch_size=B * N, **diffusion_kwargs
-        )
+        )  
 
         if model_guide is not None:
             alpha_bar_t = self.alphas_cumprod[t].clone().detach().to(samples_flat.device)
@@ -97,11 +96,9 @@ class GaussianDiffusionFactorModel(GaussianDiffusionModel):
             X_noisy = samples_flat.view(B, N, H, D)
 
             X_refined = model_guide.forward(X_noisy, alpha_bar_t)
-            print (X_noisy - X_refined)
-            print(model_guide.compute_refinement(X_noisy, X_refined))
-            # Return to flat shape expected downstream: (B, N, T, D) → (B*N, T, D)
-            # samples_flat = samples_flat.view(B * N, H, D)
-            return X_refined
+            if debug:
+                print(model_guide.compute_refinement(X_noisy, X_refined))
+            return X_refined # (B, N, H, D)
 
 
         return samples_flat.view(B, N, H, D)
