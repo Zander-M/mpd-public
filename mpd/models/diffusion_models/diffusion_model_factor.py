@@ -44,7 +44,6 @@ class GaussianDiffusionFactorModel(GaussianDiffusionModel):
                                trajs_normalized,
                                t,
                                context=None, hard_conds=None, 
-                               n_samples=1, 
                                model_guide=None,
                                debug=False,
                                **diffusion_kwargs):
@@ -69,7 +68,7 @@ class GaussianDiffusionFactorModel(GaussianDiffusionModel):
         # Indexing: [i * n_samples + j] corresponds to agent i, sample j
         cond_dict = {}
         for k, v in hard_cond_tensor.items():
-            v_exp = einops.repeat(v, 'b d -> (b n) d', n=n_samples)  # shape (B*N, D)
+            v_exp = einops.repeat(v, 'b d -> (n b) d', n=B)  # shape (B * N, D)
             cond_dict[k] = v_exp
 
         # Same for context if provided
@@ -81,7 +80,7 @@ class GaussianDiffusionFactorModel(GaussianDiffusionModel):
                 for k in context_keys
             }
             merged_context = {
-                k: einops.repeat(v, 'b d -> (b n) d', n=n_samples)
+                k: einops.repeat(v, 'b d -> (n b) d', n=B)
                 for k, v in context_tensor.items()
             }
 
@@ -92,14 +91,13 @@ class GaussianDiffusionFactorModel(GaussianDiffusionModel):
         if model_guide is not None:
             alpha_bar_t = self.alphas_cumprod[t].clone().detach().to(samples_flat.device)
 
-            # Reshape: (B*N, T, D) -> (B, N, T, D)
+            # Reshape: (B*N, H, D) -> (B, N, H, D)
             X_noisy = samples_flat.view(B, N, H, D)
 
             X_refined = model_guide.forward(X_noisy, alpha_bar_t)
             if debug:
                 print(model_guide.compute_refinement(X_noisy, X_refined))
             return X_refined # (B, N, H, D)
-
 
         return samples_flat.view(B, N, H, D)
 

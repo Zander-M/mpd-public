@@ -54,7 +54,7 @@ def experiment(
     use_guide_on_extra_objects_only: bool = False,
 
     # num_agents: int = 1, # sanity check
-    num_agents: int = 2, # number of agents
+    num_agents: int = 5, # number of agents
 
     n_samples: int = 10,
 
@@ -71,6 +71,7 @@ def experiment(
     ########################################################################
     # Guidance Related
     guidance_model: str = "FactorGuideSingleAgent",
+    # guidance_model: str = "None",
 
     ########################################################################
     device: str = 'cuda',
@@ -289,13 +290,15 @@ def experiment(
 
         # Guide params
             
-        collision_threshold = 1 
+        collision_threshold = 0.5
+
+        # Smaller -> Stronger penalty
         sigma = {
            "position_factor": 1e-2,
-           "collision_factor": 1e-2
+           "collision_factor": 1e-10
         }
         lr = 1e-3 
-        steps = 1000
+        steps = 100
 
         model_guide = FactorGuideSingleAgent(n_samples, num_agents, n_support_points, dataset.state_dim, device,
                                     collision_threshold=collision_threshold,
@@ -335,8 +338,10 @@ def experiment(
     # Sample trajectories with the diffusion/cvae model
 
     # Initialize single agent trajectories, iteratively denoise each agent's trajectory
+    # batch size (n_samples) is used here
     # (B, N, H, D)
     trajs_normalized = torch.randn(n_samples, num_agents, n_support_points, dataset.state_dim, **tensor_args)
+
     trajs_normalized_iters = []
 
     with TimerCUDA() as timer_model_sampling:
@@ -346,7 +351,6 @@ def experiment(
                 t=t,
                 context=None,
                 hard_conds=hard_conds_all,
-                n_samples=n_samples,
                 horizon=n_support_points,
                 sample_fn=ddpm_sample_fn,
                 model_guide=model_guide,
@@ -393,14 +397,13 @@ def experiment(
 
     # rendering
     if render: 
-        trajs_iters_all_agents_pos = rearrange(trajs_iters_all_agents_pos, 't b n h d -> b t n h d')
-        print(trajs_iters_all_agents_pos.shape)
+        trajs_iters_all_agents_pos = trajs_iters_all_agents_pos.permute(1, 0, 2, 3, 4) # (B, T, N, H, D)
         planner_visualizer = PlanningVisualizer(
             task=task
         )
-        planner_visualizer.render_multi_robot_trajectories(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos)
+        fig, axs = planner_visualizer.render_multi_robot_trajectories(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos)
         plt.savefig("final_trajectory.png")
-        plt.close()
+        plt.close(fig)
         planner_visualizer.animate_opt_iters_multi_robots(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos)
     return 
 

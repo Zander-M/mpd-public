@@ -114,7 +114,7 @@ class FactorGuideSingleAgent:
                  sigma=
                  {
                     "position_factor": 0.02,
-                    "collision_factor": 0.001
+                    "collision_factor": 0.0001
                  }, 
                  lr=1e-8, steps=10):
 
@@ -149,8 +149,10 @@ class FactorGuideSingleAgent:
         X_noisy = X_noisy.detach()
         num_agents = X_noisy.shape[1]
         X_refined = X_noisy.clone().detach()
-        alpha_bar = torch.clamp(alpha_bar, 0.0, 1.0).clone().detach()
         blend = torch.exp(-alpha_bar**2)
+        # blend = (1 - alpha_bar)**2  
+        # blend = 1 / (1 + torch.exp(10 * (alpha_bar - 0.5)))
+
 
         for agent_idx in range(num_agents):
             self.update_inputs(X_noisy=X_noisy, agent_idx=agent_idx, alpha_bar=alpha_bar)
