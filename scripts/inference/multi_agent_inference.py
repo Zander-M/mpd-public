@@ -54,7 +54,7 @@ def experiment(
     use_guide_on_extra_objects_only: bool = False,
 
     # num_agents: int = 1, # sanity check
-    num_agents: int = 5, # number of agents
+    num_agents: int = 3, # number of agents
 
     n_samples: int = 10,
 
@@ -290,15 +290,15 @@ def experiment(
 
         # Guide params
             
-        collision_threshold = 0.5
+        collision_threshold = 1
 
         # Smaller -> Stronger penalty
         sigma = {
            "position_factor": 1e-2,
-           "collision_factor": 1e-10
+           "collision_factor": 1e-6
         }
-        lr = 1e-3 
-        steps = 100
+        lr = 1e-3
+        steps = 1000
 
         model_guide = FactorGuideSingleAgent(n_samples, num_agents, n_support_points, dataset.state_dim, device,
                                     collision_threshold=collision_threshold,

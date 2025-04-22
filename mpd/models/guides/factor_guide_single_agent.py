@@ -15,7 +15,6 @@ from pyro import poutine
 from pyro.poutine import trace # debug
 
 # Guide 
-
 class Guide(PyroModule):
     """
         Guide for SVI. 
@@ -28,21 +27,21 @@ class Guide(PyroModule):
         self.agent_idx = agent_idx
         self.device = X_noisy.device
 
-        # Place Holders
-        self.loc = PyroParam(torch.zeros(self.B, self.H-2, self.D, device=self.device, requires_grad=True))
-        self.scales = PyroParam(torch.full((self.B, self.H-2, self.D), 1.0, device=self.device, requires_grad=True),
-                                    constraint=constraints.positive)
+        # Permute Batch as guide
+        perm = torch.randperm(self.B)
+        # X_perm = X_noisy[perm]
+        X_perm = X_noisy
+        self.loc = PyroParam(X_perm[:, agent_idx, 1:-1,]) # (B, H-2, D)
+        self.log_scales = PyroParam(torch.full((self.B, self.H-2, self.D), -1.0, device=self.device),
+                                    constraint=constraints.greater_than(-10))
 
     def forward(self, *args, **kwargs):
 
-        assert self.loc.requires_grad, "Guide.loc is not differentible!" 
-
         # Use initial noisy trajectory as sampling guide
         with pyro.plate("batch", self.B):
-            pyro.sample("z", dist.Normal(self.loc, self.scales).to_event(2))
+            pyro.sample("z", dist.Normal(self.loc, self.log_scales.exp()).to_event(2))
 
 # Model
-
 class FactorModel(PyroModule):
     """
         Collision avoidance model, supports trajectory update
@@ -88,8 +87,8 @@ class FactorModel(PyroModule):
             ], dim=1)
 
             # Collision Avoidance Factor
-            xi = x.unsqueeze(1) # (B, 1, H, D)
-            xj = self.X_noisy   # (B, N, H, D)
+            xi = x[..., :2].unsqueeze(1) # (B, 1, H, 2) only the first two dim are related to position. Same below
+            xj = self.X_noisy[..., :2]   # (B, N, H, 2)
             dists_sq = ((xi - xj) ** 2).sum(dim=-1)  # (B, N, H)
             repulsion = torch.exp(-dists_sq/(2* self.sigma["collision_factor"] ** 2))
             mask = (dists_sq< self.collision_threshold**2).float()
@@ -100,7 +99,6 @@ class FactorModel(PyroModule):
             agent_mask[self.agent_idx] = 0.0
             penalty_terms = penalty_terms * agent_mask.view(1, self.N, 1) # (B, N, H)
             penalty = -self.alpha_bar * penalty_terms.sum(dim=[1, 2]) # (B,)
-
             pyro.factor(f"collsion_{self.agent_idx}", penalty)
         
 # Module 
@@ -149,10 +147,9 @@ class FactorGuideSingleAgent:
         X_noisy = X_noisy.detach()
         num_agents = X_noisy.shape[1]
         X_refined = X_noisy.clone().detach()
-        blend = torch.exp(-alpha_bar**2)
+        # blend = torch.exp(-alpha_bar**2)
         # blend = (1 - alpha_bar)**2  
-        # blend = 1 / (1 + torch.exp(10 * (alpha_bar - 0.5)))
-
+        blend = 1 / (1 + torch.exp(10 * (alpha_bar - 0.5)))
 
         for agent_idx in range(num_agents):
             self.update_inputs(X_noisy=X_noisy, agent_idx=agent_idx, alpha_bar=alpha_bar)
@@ -160,6 +157,8 @@ class FactorGuideSingleAgent:
             goals = X_noisy[:, agent_idx, -1]
             for step in range(self.steps):
                 loss = self.optimizer.step()
+                if step % 500 == 0:
+                    print(f"Step {step} loss:", loss)
             refined_paths = self.guide.loc.detach()
             refined_paths = torch.cat([
                 starts.unsqueeze(1),

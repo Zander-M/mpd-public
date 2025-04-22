@@ -68,15 +68,15 @@ class FactorModel(PyroModule):
 
 if __name__ == "__main__":
 
-    device = "cpu"
+    device = "cuda:0"
     B = 10
     H = 64
 
-    num_steps = 5000
+    num_steps = 1000
     lr = 1e-2
 
     # Example: dummy inputs
-    x_noisy = torch.randn(B, H, device=device, requires_grad=True)
+    x_noisy = torch.randn(B, H, device=device)
 
     model = FactorModel(X_noisy=x_noisy)
     guide = Guide(X_noisy=x_noisy)
@@ -89,4 +89,4 @@ if __name__ == "__main__":
         if _ % 500 == 0:
             print(f"Step {_} loss :", loss)
             # print("guide grad", guide.loc.grad)
-    print(start - guide.loc.detach().clone())
+    print(guide.loc.detach().clone())

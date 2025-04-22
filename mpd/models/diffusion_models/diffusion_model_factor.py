@@ -88,7 +88,7 @@ class GaussianDiffusionFactorModel(GaussianDiffusionModel):
             trajs_flat, t, cond_dict, context=merged_context, batch_size=B * N, **diffusion_kwargs
         )  
 
-        if model_guide is not None:
+        if model_guide is not None and t > 12:
             alpha_bar_t = self.alphas_cumprod[t].clone().detach().to(samples_flat.device)
 
             # Reshape: (B*N, H, D) -> (B, N, H, D)
