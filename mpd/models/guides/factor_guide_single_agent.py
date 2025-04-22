@@ -24,22 +24,16 @@ class Guide(PyroModule):
         super().__init__()
 
         self.B, _, self.H, self.D = X_noisy.shape
-        self.agent_idx = agent_idx
         self.device = X_noisy.device
-
-        # Permute Batch as guide
-        perm = torch.randperm(self.B)
-        # X_perm = X_noisy[perm]
-        X_perm = X_noisy
-        self.loc = PyroParam(X_perm[:, agent_idx, 1:-1,]) # (B, H-2, D)
+        self.agent_idx = agent_idx
+        self.loc = PyroParam(X_noisy[:, agent_idx, 1:-1].clone().detach()) # (B, H-2, D)
         self.log_scales = PyroParam(torch.full((self.B, self.H-2, self.D), -1.0, device=self.device),
                                     constraint=constraints.greater_than(-10))
 
     def forward(self, *args, **kwargs):
-
         # Use initial noisy trajectory as sampling guide
         with pyro.plate("batch", self.B):
-            pyro.sample("z", dist.Normal(self.loc, self.log_scales.exp()).to_event(2))
+            pyro.sample(f"z", dist.Normal(self.loc, torch.exp(self.log_scales)).to_event(2))
 
 # Model
 class FactorModel(PyroModule):
@@ -75,31 +69,44 @@ class FactorModel(PyroModule):
         with pyro.plate("batch", self.B):
 
             # Force the start and goal position
-            z = pyro.sample(
-                "z",
-                dist.Normal(torch.zeros((self.B, self.H-2, self.D), device=self.device), 
-                            torch.ones((self.B, self.H-2, self.D), device=self.device)).to_event(2)
-            )
+            z = pyro.sample("z", dist.Normal(
+                torch.zeros(self.B, self.H-2, self.D, device=self.device),
+                torch.ones(self.B,self.H-2, self.D, device=self.device)
+            ).to_event(2))
+
             x = torch.cat([
-                self.starts.unsqueeze(1),
-                z,
-                self.goals.unsqueeze(1)
-            ], dim=1)
+                self.starts.unsqueeze(1),  # (B, 1, D)
+                z,                         # (B, H-2, D)
+                self.goals.unsqueeze(1)    # (B, 1, D)
+            ], dim=1)  # (B, H, D)
 
-            # Collision Avoidance Factor
-            xi = x[..., :2].unsqueeze(1) # (B, 1, H, 2) only the first two dim are related to position. Same below
-            xj = self.X_noisy[..., :2]   # (B, N, H, 2)
+            # === Collision Avoidance Factor (harsh) === #
+            xi = x[..., :2].unsqueeze(1)         # (B, 1, H, 2)
+            xj = self.X_noisy[..., :2]           # (B, N, H, 2)
             dists_sq = ((xi - xj) ** 2).sum(dim=-1)  # (B, N, H)
-            repulsion = torch.exp(-dists_sq/(2* self.sigma["collision_factor"] ** 2))
-            mask = (dists_sq< self.collision_threshold**2).float()
-            penalty_terms = repulsion*mask # (B, N, H)
 
-            # Mask self collision
+            # Harsher repulsion: inverse distance and exponential
+            epsilon = 1e-6
+            repulsion = torch.exp(-dists_sq / (2 * self.sigma["collision_factor"] ** 2)) / (dists_sq + epsilon)
+
+            mask = (dists_sq < self.collision_threshold ** 2).float()
+            penalty_terms = repulsion * mask  # (B, N, H)
+
+            # Mask self-collision
             agent_mask = torch.ones(self.N, device=self.device)
             agent_mask[self.agent_idx] = 0.0
-            penalty_terms = penalty_terms * agent_mask.view(1, self.N, 1) # (B, N, H)
-            penalty = -self.alpha_bar * penalty_terms.sum(dim=[1, 2]) # (B,)
-            pyro.factor(f"collsion_{self.agent_idx}", penalty)
+            penalty_terms *= agent_mask.view(1, self.N, 1)  # (B, N, H)
+
+            penalty = -self.alpha_bar * penalty_terms.sum(dim=[1, 2])  # (B,)
+            pyro.factor("collision", penalty)
+
+            # === Smoothness Penalty === #
+            pos = x[..., :2]  # Only positions, (B, H, 2)
+            acc = pos[:, 2:] - 2 * pos[:, 1:-1] + pos[:, :-2]  # (B, H-2, 2)
+            smooth_cost = acc.pow(2).sum(dim=-1)  # (B, H-2)
+            smoothness_penalty = -smooth_cost.sum(dim=-1) / (2 * self.sigma["smoothness_factor"] ** 2)  # (B,)
+            pyro.factor("smoothness", smoothness_penalty)
+
         
 # Module 
 class FactorGuideSingleAgent:
@@ -126,46 +133,40 @@ class FactorGuideSingleAgent:
         self.lr = lr
         self.steps = steps
 
-        # Initialize model and guide 
-        self.model = None
-        self.guide = None
-        self.optimizer = None
-
-    def update_inputs(self, X_noisy, agent_idx, alpha_bar):
+    def instance_setup(self, X_noisy, agent_idx, alpha_bar):
         """
-            Update current model and guidance based on new input
+            Setup an SVI instance based on inputs.
         """
-        self.model = FactorModel(X_noisy=X_noisy, agent_idx=agent_idx, alpha_bar=alpha_bar,
+        model = FactorModel(X_noisy=X_noisy, agent_idx=agent_idx, alpha_bar=alpha_bar,
                                  collision_threshold=self.collision_threshold, sigma=self.sigma)
-        self.guide = Guide(X_noisy=X_noisy, agent_idx=agent_idx) 
-        self.optimizer = SVI(self.model, self.guide, ClippedAdam({"lr": self.lr}), loss=Trace_ELBO())
+        guide = Guide(X_noisy=X_noisy, agent_idx=agent_idx) 
+        optimizer = SVI(model, guide, ClippedAdam({"lr": self.lr}), loss=Trace_ELBO())
+        return model, guide, optimizer
 
     def forward(self, X_noisy, alpha_bar):
         """
             Iterate through agents and return updated trajectories
         """
-        X_noisy = X_noisy.detach()
         num_agents = X_noisy.shape[1]
-        X_refined = X_noisy.clone().detach()
-        # blend = torch.exp(-alpha_bar**2)
-        # blend = (1 - alpha_bar)**2  
-        blend = 1 / (1 + torch.exp(10 * (alpha_bar - 0.5)))
+        X_refined = torch.zeros_like(X_noisy, device=self.device)
+        # blend = 1.0 - torch.exp(-30 * (1.0 - alpha_bar)) 
+        blend = torch.exp(-(1-alpha_bar)**2) 
 
         for agent_idx in range(num_agents):
-            self.update_inputs(X_noisy=X_noisy, agent_idx=agent_idx, alpha_bar=alpha_bar)
-            starts = X_noisy[:, agent_idx, 0]
-            goals = X_noisy[:, agent_idx, -1]
+            pyro.clear_param_store()
+            model, guide, optimizer = self.instance_setup(X_noisy=X_noisy, agent_idx=agent_idx, alpha_bar=alpha_bar)
             for step in range(self.steps):
-                loss = self.optimizer.step()
-                if step % 500 == 0:
-                    print(f"Step {step} loss:", loss)
-            refined_paths = self.guide.loc.detach()
+                loss = optimizer.step()
+                # if step % 500 == 0:
+                #     print(f"Step {step} loss:", loss)
+            refined_paths = guide.loc.clone().detach()
             refined_paths = torch.cat([
-                starts.unsqueeze(1),
+                model.starts.unsqueeze(1),
                 refined_paths,
-                goals.unsqueeze(1)
+                model.goals.unsqueeze(1)
             ], dim=1)
-            X_refined[:, agent_idx] = blend * X_noisy[:, agent_idx] + (1 - blend) * refined_paths
+            # X_refined[:, agent_idx] = (blend)* X_noisy[:, agent_idx] + (1-blend) * refined_paths
+            X_refined[:, agent_idx] = refined_paths
         return X_refined
 
     ## Utils

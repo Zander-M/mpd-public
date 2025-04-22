@@ -54,13 +54,13 @@ def experiment(
     use_guide_on_extra_objects_only: bool = False,
 
     # num_agents: int = 1, # sanity check
-    num_agents: int = 3, # number of agents
+    num_agents: int = 8, # number of agents
 
     n_samples: int = 10,
 
     start_guide_steps_fraction: float = 0.25,
     n_guide_steps: int = 5,
-    n_diffusion_steps_without_noise: int = 5,
+    n_diffusion_steps_without_noise: int = 0,
 
     weight_grad_cost_collision: float = 1e-2,
     weight_grad_cost_smoothness: float = 1e-7,
@@ -289,42 +289,42 @@ def experiment(
         print("Using Factor Guide Single Agent")
 
         # Guide params
-            
-        collision_threshold = 1
+        model_guide_param = dict(
+            B=n_samples,
+            N=num_agents,
+            H=n_support_points,
+            D=dataset.state_dim,
+            device=device,
+            collision_threshold = 0.5,
+            sigma = {
+            # Smaller -> Stronger penalty
+               "position_factor": 1e4,
+               "collision_factor": 1e-1,
+               "smoothness_factor": 1e-2
 
-        # Smaller -> Stronger penalty
-        sigma = {
-           "position_factor": 1e-2,
-           "collision_factor": 1e-6
-        }
-        lr = 1e-3
-        steps = 1000
+            },
+            lr = 1e-2,
+            steps = 500,
+        )
+        model_guide = FactorGuideSingleAgent
 
-        model_guide = FactorGuideSingleAgent(n_samples, num_agents, n_support_points, dataset.state_dim, device,
-                                    collision_threshold=collision_threshold,
-                                    sigma=sigma,
-                                    lr=lr,
-                                    steps=steps
-                                  )
     elif guidance_model == "FactorGuideCentralized":
         print("Using Factor Guide Centralized")
 
         # Guide params
-            
-        collision_threshold = 0.2
-        sigma = {
-           "position_factor": 1e-8,
-           "collision_factor": 1e-8
-        }
-        lr = 1e-4 
-        steps = 100
+        model_guide_param = dict(
+            collision_threshold = 1,
+            sigma = {
+            # Smaller -> Stronger penalty
+               "position_factor": 1e-2,
+               "collision_factor": 1e-6
+            },
+            lr = 1e-3,
+            steps = 10,
+        )
+        
+        model_guide = FactorGuideCentralized   
 
-        model_guide = FactorGuideCentralized(n_samples, num_agents, n_support_points, dataset.state_dim, device,
-                                    collision_threshold=collision_threshold,
-                                    sigma=sigma,
-                                    lr=lr,
-                                    steps=steps
-                                  )       
     elif guidance_model == "MonteCarlo":
         pass
         # model_guide = MonteCarloGuide(
@@ -334,6 +334,7 @@ def experiment(
     else:
         print("No guidance model used.")
         model_guide = None
+        model_guide_param = None
     ########
     # Sample trajectories with the diffusion/cvae model
 
@@ -354,6 +355,8 @@ def experiment(
                 horizon=n_support_points,
                 sample_fn=ddpm_sample_fn,
                 model_guide=model_guide,
+                model_guide_param=model_guide_param,
+                debug=debug,
                 **sample_fn_kwargs,
             )
             trajs_normalized_iters.append(trajs_normalized.clone())
