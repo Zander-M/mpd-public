@@ -54,9 +54,9 @@ def experiment(
     use_guide_on_extra_objects_only: bool = False,
 
     # num_agents: int = 1, # sanity check
-    num_agents: int = 8, # number of agents
+    num_agents: int = 40, # number of agents
 
-    n_samples: int = 10,
+    n_samples: int = 1024,
 
     start_guide_steps_fraction: float = 0.25,
     n_guide_steps: int = 5,
@@ -70,7 +70,8 @@ def experiment(
     trajectory_duration: float = 5.0,  # currently fixed
     ########################################################################
     # Guidance Related
-    guidance_model: str = "FactorGuideSingleAgent",
+    # guidance_model: str = "FactorGuideSingleAgent",
+    guidance_model: str = "FactorGuideCentralized",
     # guidance_model: str = "None",
 
     ########################################################################
@@ -299,12 +300,11 @@ def experiment(
             sigma = {
             # Smaller -> Stronger penalty
                "position_factor": 1e4,
-               "collision_factor": 1e-1,
-               "smoothness_factor": 1e-2
-
+               "collision_factor": 1e-3,
+               "smoothness_factor": 1e-3
             },
             lr = 1e-2,
-            steps = 500,
+            steps = 100,
         )
         model_guide = FactorGuideSingleAgent
 
@@ -313,14 +313,21 @@ def experiment(
 
         # Guide params
         model_guide_param = dict(
-            collision_threshold = 1,
+            B=n_samples,
+            N=num_agents,
+            H=n_support_points,
+            D=dataset.state_dim,
+            device=device,
+            collision_threshold = 0.8,
             sigma = {
             # Smaller -> Stronger penalty
-               "position_factor": 1e-2,
-               "collision_factor": 1e-6
+               "position_factor": 1e4,
+               "collision_factor": 1e-7,
+               "smoothness_factor": 5e-3
+
             },
-            lr = 1e-3,
-            steps = 10,
+            lr = 1e-2,
+            steps = 500,
         )
         
         model_guide = FactorGuideCentralized   
@@ -404,7 +411,7 @@ def experiment(
         planner_visualizer = PlanningVisualizer(
             task=task
         )
-        fig, axs = planner_visualizer.render_multi_robot_trajectories(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos)
+        fig, axs = planner_visualizer.render_multi_robot_trajectories_steps(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos)
         plt.savefig("final_trajectory.png")
         plt.close(fig)
         planner_visualizer.animate_opt_iters_multi_robots(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos)

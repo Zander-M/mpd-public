@@ -8,5 +8,6 @@ dependencies:
   - patchelf
   - pip:
       - pyyaml
+      - pyro-ppl
       - matplotlib
       - numpy=1.23

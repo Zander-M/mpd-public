@@ -71,7 +71,7 @@ class FactorModel(PyroModule):
             # Force the start and goal position
             z = pyro.sample("z", dist.Normal(
                 torch.zeros(self.B, self.H-2, self.D, device=self.device),
-                torch.ones(self.B,self.H-2, self.D, device=self.device)
+                torch.ones(self.B, self.H-2, self.D, device=self.device)
             ).to_event(2))
 
             x = torch.cat([
