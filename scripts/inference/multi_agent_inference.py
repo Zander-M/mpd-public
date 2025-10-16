@@ -2,14 +2,19 @@
     Multi-agent inference
 """
 
+
 import os
 import pickle
 from math import ceil
 from pathlib import Path
+from typing import List, Optional, Tuple, get_type_hints
 
 import einops
+import matplotlib.animation as animation
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
+from torch.utils.data import Dataset
 from einops import rearrange
 from einops._torch_specific import allow_ops_in_compiled_graph  # requires einops>=0.6.1
 
@@ -37,7 +42,6 @@ allow_ops_in_compiled_graph()
 
 TRAINED_MODELS_DIR = '../../data_trained_models/'
 
-
 @single_experiment_yaml
 def experiment(
     ########################################################################################################################
@@ -46,18 +50,13 @@ def experiment(
     # model_id: str = 'EnvNarrowPassageDense2D-RobotPointMassFactor',
     # model_id: str = 'EnvSimple2D-RobotPointMassFactor',
     model_id: str = 'EnvEmpty2D-RobotPointMass',
-
     # planner_alg: str = 'diffusion_prior',
     # planner_alg: str = 'diffusion_prior_then_guide',
     planner_alg: str = 'mpd',
-
     use_guide_on_extra_objects_only: bool = False,
-
     # num_agents: int = 1, # sanity check
-    num_agents: int = 40, # number of agents
-
-    n_samples: int = 1024,
-
+    num_agents: int = 16, # number of agents
+    n_samples: int = 128,
     start_guide_steps_fraction: float = 0.25,
     n_guide_steps: int = 5,
     n_diffusion_steps_without_noise: int = 0,
@@ -92,8 +91,8 @@ def experiment(
     ########################################################################################################################
     fix_random_seed(seed)
 
-    device = get_torch_device(device)
-    tensor_args = {'device': device, 'dtype': torch.float32}
+    torch_device = get_torch_device(device)
+    tensor_args = {'device': torch_device, 'dtype': torch.float32}
 
     ########################################################################################################################
     print(f'##########################################################################################################')
@@ -127,10 +126,10 @@ def experiment(
         tensor_args=tensor_args
     )
     dataset = train_subset.dataset
-    n_support_points = dataset.n_support_points
-    env = dataset.env
-    robot = dataset.robot
-    task = dataset.task
+    n_support_points = dataset.n_support_points # type:ignore
+    env = dataset.env # type:ignore
+    robot = dataset.robot # type:ignore
+    task = dataset.task # type:ignore
 
     dt = trajectory_duration / n_support_points  # time interval for finite differences
 
@@ -145,8 +144,8 @@ def experiment(
         predict_epsilon=args['predict_epsilon'],
     )
     unet_configs = dict(
-        state_dim=dataset.state_dim,
-        n_support_points=dataset.n_support_points,
+        state_dim=dataset.state_dim, # type:ignore
+        n_support_points=dataset.n_support_points,  # type: ignore
         unet_input_dim=args['unet_input_dim'],
         dim_mults=UNET_DIM_MULTS[args['unet_dim_mults_option']],
     )
@@ -170,7 +169,7 @@ def experiment(
 
     freeze_torch_model_params(model)
     model = torch.compile(model)
-    model.warmup(horizon=n_support_points, device=device)
+    model.warmup(horizon=n_support_points, device=torch_device) 
 
     ########################################################################################################################
     start_goal_pairs = []
@@ -198,7 +197,7 @@ def experiment(
                 start = q_free[0]
                 goal = q_free[1]
 
-                if torch.linalg.norm(start - goal) > dataset.threshold_start_goal_pos:
+                if torch.linalg.norm(start - goal) > dataset.threshold_start_goal_pos: # type: ignore
                     start_goal_pairs.append((start, goal))
                     break
 
@@ -216,7 +215,7 @@ def experiment(
     # normalize start and goal positions
 
     hard_conds_all = [
-        dataset.get_hard_conditions(start_goal_tensor[i], normalize=True)
+        dataset.get_hard_conditions(start_goal_tensor[i], normalize=True) # type: ignore
         for i in range(num_agents)
     ]
     context = None
@@ -275,7 +274,7 @@ def experiment(
             tensor_args=tensor_args,
     )
 
-    t_start_guide = ceil(start_guide_steps_fraction * model.n_diffusion_steps)
+    t_start_guide = ceil(start_guide_steps_fraction * model.n_diffusion_steps) # type: ignore
     sample_fn_kwargs = dict(
         guide = None, # No guide
         # guide=None if run_prior_then_guidance or run_prior_only else guide,
@@ -294,7 +293,7 @@ def experiment(
             B=n_samples,
             N=num_agents,
             H=n_support_points,
-            D=dataset.state_dim,
+            D=dataset.state_dim, # type: ignore
             device=device,
             collision_threshold = 0.5,
             sigma = {
@@ -316,15 +315,14 @@ def experiment(
             B=n_samples,
             N=num_agents,
             H=n_support_points,
-            D=dataset.state_dim,
+            D=dataset.state_dim, # type: ignore
             device=device,
             collision_threshold = 0.8,
             sigma = {
-            # Smaller -> Stronger penalty
+            # Denominator. Smaller -> Stronger penalty
                "position_factor": 1e4,
                "collision_factor": 1e-7,
                "smoothness_factor": 5e-3
-
             },
             lr = 1e-2,
             steps = 500,
@@ -348,21 +346,21 @@ def experiment(
     # Initialize single agent trajectories, iteratively denoise each agent's trajectory
     # batch size (n_samples) is used here
     # (B, N, H, D)
-    trajs_normalized = torch.randn(n_samples, num_agents, n_support_points, dataset.state_dim, **tensor_args)
+    trajs_normalized = torch.randn(n_samples, num_agents, n_support_points, dataset.state_dim, **tensor_args) # type: ignore
 
     trajs_normalized_iters = []
 
     with TimerCUDA() as timer_model_sampling:
-        for t in reversed(range(-n_diffusion_steps_without_noise, model.n_diffusion_steps)):
-            trajs_normalized = model.run_inference_one_step(
+        for t in reversed(range(-n_diffusion_steps_without_noise, model.n_diffusion_steps)): # type: ignore
+            trajs_normalized = model.run_inference_one_step( # type: ignore
                 trajs_normalized=trajs_normalized,
                 t=t,
                 context=None,
                 hard_conds=hard_conds_all,
                 horizon=n_support_points,
                 sample_fn=ddpm_sample_fn,
-                model_guide=model_guide,
-                model_guide_param=model_guide_param,
+                model_guide=model_guide, # type: ignore
+                model_guide_param=model_guide_param, # type: ignore
                 debug=debug,
                 **sample_fn_kwargs,
             )
@@ -372,12 +370,12 @@ def experiment(
     t_total = timer_model_sampling.elapsed
 
     # Stack over time to get (T, B, N, H, D)
-    trajs_iters_all = torch.stack(
-        [dataset.unnormalize_trajectories(t) for t in trajs_normalized_iters], dim=0
+    trajs_iters = torch.stack(
+        [dataset.unnormalize_trajectories(t) for t in trajs_normalized_iters], dim=0 # type: ignore
     )
 
     # Get positions: (T, B, N, H, 2)
-    trajs_iters_all_agents_pos = robot.get_position(trajs_iters_all)
+    trajs_iters_all_agents_pos = robot.get_position(trajs_iters)
 
     ########
     # run extra guiding steps without diffusion
@@ -403,10 +401,114 @@ def experiment(
         t_total = timer_model_sampling.elapsed + timer_post_model_sample_guide.elapsed
 
     # unnormalize trajectory samples from the models
-    # TODO: collect multi-agent stats here
+    multi_agent_stats = {}
+    if num_agents > 1:
+        pos_final = trajs_iters_all_agents_pos[-1]  # (B, N, H, D_pos)
+        pairwise_offsets = pos_final[:, :, None, :, :] - pos_final[:, None, :, :, :]
+        pairwise_distances = torch.linalg.norm(pairwise_offsets, dim=-1)  # (B, N, N, H)
 
-    # rendering
-    if render: 
+        diag_mask = torch.eye(num_agents, dtype=torch.bool, device=pairwise_distances.device).view(1, num_agents, num_agents, 1)
+        pairwise_distances_excl_self = pairwise_distances.masked_fill(diag_mask, float('inf'))
+
+        min_pairwise_dist_per_agent = pairwise_distances_excl_self.min(dim=-1).values.min(dim=-1).values  # (B, N)
+        min_pairwise_dist_per_traj = min_pairwise_dist_per_agent.min(dim=-1).values  # (B,)
+
+        valid_mask = (~diag_mask).expand_as(pairwise_distances)
+        valid_counts = valid_mask.float().sum(dim=(1, 2, 3)).clamp_min(1.0)
+        mean_pairwise_distance = (pairwise_distances * valid_mask.float()).sum(dim=(1, 2, 3)) / valid_counts
+
+        collision_threshold = 0.5
+        if isinstance(model_guide_param, dict) and 'collision_threshold' in model_guide_param:
+            collision_threshold = float(model_guide_param['collision_threshold'])
+
+        pairwise_violations = (pairwise_distances < collision_threshold) & valid_mask
+        violation_fraction = pairwise_violations.float().sum(dim=(1, 2, 3)) / valid_counts
+
+        print(f'multi-agent min pairwise distance (mean over batch): {min_pairwise_dist_per_traj.mean().item():.4f}')
+        print(f'multi-agent pairwise violation fraction (mean over batch): {violation_fraction.mean().item():.4f}')
+
+        multi_agent_stats = {
+            'pairwise_distance_min_per_agent': min_pairwise_dist_per_agent.detach().cpu(),
+            'pairwise_distance_min_per_traj': min_pairwise_dist_per_traj.detach().cpu(),
+            'pairwise_distance_mean_per_traj': mean_pairwise_distance.detach().cpu(),
+            'pairwise_violation_fraction_per_traj': violation_fraction.detach().cpu(),
+            'pairwise_violation_threshold': collision_threshold,
+        }
+
+    else: 
+
+        trajs_final = trajs_iters[-1]
+
+        trajs_final_coll, trajs_final_coll_idxs, trajs_final_free, trajs_final_free_idxs, _ = task.get_trajs_collision_and_free(trajs_final, return_indices=True)
+
+        ########################################################################################################################
+        # Compute motion planning metrics
+        print(f'\n----------------METRICS----------------')
+        print(f't_total: {t_total:.3f} sec')
+
+        success_free_trajs = task.compute_success_free_trajs(trajs_final)
+        fraction_free_trajs = task.compute_fraction_free_trajs(trajs_final)
+        collision_intensity_trajs = task.compute_collision_intensity_trajs(trajs_final)
+
+        print(f'success: {success_free_trajs}')
+        print(f'percentage free trajs: {fraction_free_trajs*100:.2f}')
+        print(f'percentage collision intensity: {collision_intensity_trajs*100:.2f}')
+
+        # compute costs only on collision-free trajectories
+        traj_final_free_best = None
+        idx_best_traj = None
+        cost_best_free_traj = None
+        cost_smoothness = None
+        cost_path_length = None
+        cost_all = None
+        variance_waypoint_trajs_final_free = None
+        if trajs_final_free is not None:
+            cost_smoothness = compute_smoothness(trajs_final_free, robot)
+            print(f'cost smoothness: {cost_smoothness.mean():.4f}, {cost_smoothness.std():.4f}')
+
+            cost_path_length = compute_path_length(trajs_final_free, robot)
+            print(f'cost path length: {cost_path_length.mean():.4f}, {cost_path_length.std():.4f}')
+
+            # compute best trajectory
+            cost_all = cost_path_length + cost_smoothness
+            idx_best_traj = torch.argmin(cost_all).item()
+            traj_final_free_best = trajs_final_free[idx_best_traj]
+            cost_best_free_traj = torch.min(cost_all).item()
+            print(f'cost best: {cost_best_free_traj:.3f}')
+
+            # variance of waypoints
+            variance_waypoint_trajs_final_free = compute_variance_waypoints(trajs_final_free, robot)
+            print(f'variance waypoint: {variance_waypoint_trajs_final_free:.4f}')
+
+        print(f'\n--------------------------------------\n')
+
+        ########################################################################################################################
+        # Save data
+        results_data_dict = {
+            'trajs_iters': trajs_iters,
+            'trajs_final_coll': trajs_final_coll,
+            'trajs_final_coll_idxs': trajs_final_coll_idxs,
+            'trajs_final_free': trajs_final_free,
+            'trajs_final_free_idxs': trajs_final_free_idxs,
+            'success_free_trajs': success_free_trajs,
+            'fraction_free_trajs': fraction_free_trajs,
+            'collision_intensity_trajs': collision_intensity_trajs,
+            'idx_best_traj': idx_best_traj,
+            'traj_final_free_best': traj_final_free_best,
+            'cost_best_free_traj': cost_best_free_traj,
+            'cost_path_length_trajs_final_free': cost_smoothness,
+            'cost_smoothness_trajs_final_free': cost_path_length,
+            'cost_all_trajs_final_free': cost_all,
+            'variance_waypoint_trajs_final_free': variance_waypoint_trajs_final_free,
+            't_total': t_total,
+            'multi_agent_stats': multi_agent_stats,
+        }
+        with open(os.path.join(results_dir, 'results_data_dict.pickle'), 'wb') as handle:
+            pickle.dump(results_data_dict, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    ########################################################################################################################
+    # Render results
+    if render:
         trajs_iters_all_agents_pos = trajs_iters_all_agents_pos.permute(1, 0, 2, 3, 4) # (B, T, N, H, D)
         planner_visualizer = PlanningVisualizer(
             task=task
@@ -415,182 +517,13 @@ def experiment(
         plt.savefig("final_trajectory.png")
         plt.close(fig)
         planner_visualizer.animate_opt_iters_multi_robots(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos)
+        # TODO: fill in here
+        planner_visualizer.animate_multi_robot_trajectories(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos, n_interpolation=1)
     return 
-
-    # Plot all agents' denoising trajectories
-
-    fig = plt.figure(figsize=(8, 8))
-    ax = fig.add_subplot(111)
-
-    print("traj shape", trajs_iters_all_agents_pos.shape)
-    num_steps = trajs_iters_all_agents_pos.shape[1]
-    for t in range(num_steps):
-        for agent_idx in range(num_agents):
-            colors = plt.cm.viridis(torch.linspace(0, 1, num_steps))
-            pos = trajs_iters_all_agents_pos[agent_idx, t, 0].cpu().numpy()
-            ax.plot(pos[:, 0], pos[:, 1], color=colors[t], alpha=0.5)
-
-    ax.set_title("Denoising Trajectories for All Agents")
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    ax.set_aspect("equal")
-    plt.tight_layout()
-    plt.show()
-    return
-
-    trajs_final = trajs_iters[-1]
-
-    trajs_final_coll, trajs_final_coll_idxs, trajs_final_free, trajs_final_free_idxs, _ = task.get_trajs_collision_and_free(trajs_final, return_indices=True)
-
-    ########################################################################################################################
-    # Compute motion planning metrics
-    print(f'\n----------------METRICS----------------')
-    print(f't_total: {t_total:.3f} sec')
-
-    success_free_trajs = task.compute_success_free_trajs(trajs_final)
-    fraction_free_trajs = task.compute_fraction_free_trajs(trajs_final)
-    collision_intensity_trajs = task.compute_collision_intensity_trajs(trajs_final)
-
-    print(f'success: {success_free_trajs}')
-    print(f'percentage free trajs: {fraction_free_trajs*100:.2f}')
-    print(f'percentage collision intensity: {collision_intensity_trajs*100:.2f}')
-
-    # compute costs only on collision-free trajectories
-    traj_final_free_best = None
-    idx_best_traj = None
-    cost_best_free_traj = None
-    cost_smoothness = None
-    cost_path_length = None
-    cost_all = None
-    variance_waypoint_trajs_final_free = None
-    if trajs_final_free is not None:
-        cost_smoothness = compute_smoothness(trajs_final_free, robot)
-        print(f'cost smoothness: {cost_smoothness.mean():.4f}, {cost_smoothness.std():.4f}')
-
-        cost_path_length = compute_path_length(trajs_final_free, robot)
-        print(f'cost path length: {cost_path_length.mean():.4f}, {cost_path_length.std():.4f}')
-
-        # compute best trajectory
-        cost_all = cost_path_length + cost_smoothness
-        idx_best_traj = torch.argmin(cost_all).item()
-        traj_final_free_best = trajs_final_free[idx_best_traj]
-        cost_best_free_traj = torch.min(cost_all).item()
-        print(f'cost best: {cost_best_free_traj:.3f}')
-
-        # variance of waypoints
-        variance_waypoint_trajs_final_free = compute_variance_waypoints(trajs_final_free, robot)
-        print(f'variance waypoint: {variance_waypoint_trajs_final_free:.4f}')
-
-    print(f'\n--------------------------------------\n')
-
-    ########################################################################################################################
-    # Save data
-    results_data_dict = {
-        'trajs_iters': trajs_iters,
-        'trajs_final_coll': trajs_final_coll,
-        'trajs_final_coll_idxs': trajs_final_coll_idxs,
-        'trajs_final_free': trajs_final_free,
-        'trajs_final_free_idxs': trajs_final_free_idxs,
-        'success_free_trajs': success_free_trajs,
-        'fraction_free_trajs': fraction_free_trajs,
-        'collision_intensity_trajs': collision_intensity_trajs,
-        'idx_best_traj': idx_best_traj,
-        'traj_final_free_best': traj_final_free_best,
-        'cost_best_free_traj': cost_best_free_traj,
-        'cost_path_length_trajs_final_free': cost_smoothness,
-        'cost_smoothness_trajs_final_free': cost_path_length,
-        'cost_all_trajs_final_free': cost_all,
-        'variance_waypoint_trajs_final_free': variance_waypoint_trajs_final_free,
-        't_total': t_total
-    }
-    with open(os.path.join(results_dir, 'results_data_dict.pickle'), 'wb') as handle:
-        pickle.dump(results_data_dict, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-    ########################################################################################################################
-    # Render results
-    if render:
-        for agent_idx in range(num_agents):
-            start_state_pos, goal_state_pos = start_goal_pairs[agent_idx] 
-            # Render
-            planner_visualizer = PlanningVisualizer(
-                task=task,
-            )
-
-            base_file_name = Path(os.path.basename(__file__)).stem
-
-            pos_trajs_iters = robot.get_position(trajs_iters)
-
-            planner_visualizer.animate_opt_iters_joint_space_state(
-                trajs=trajs_iters,
-                pos_start_state=start_state_pos, pos_goal_state=goal_state_pos,
-                vel_start_state=torch.zeros_like(start_state_pos), vel_goal_state=torch.zeros_like(goal_state_pos),
-                traj_best=traj_final_free_best,
-                video_filepath=os.path.join(results_dir, f'{base_file_name}-joint-space-opt-iters.mp4'),
-                n_frames=max((2, len(trajs_iters))),
-                anim_time=5
-            )
-
-            if isinstance(robot, RobotPanda):
-                # visualize in Isaac Gym
-                # POSITION CONTROL
-                # add initial positions for better visualization
-                n_first_steps = 10
-                n_last_steps = 10
-
-                trajs_pos = robot.get_position(trajs_final_free).movedim(1, 0)
-                trajs_vel = robot.get_velocity(trajs_final_free).movedim(1, 0)
-
-                trajs_pos = interpolate_traj_via_points(trajs_pos.movedim(0, 1), 2).movedim(1, 0)
-
-                motion_planning_isaac_env = PandaMotionPlanningIsaacGymEnv(
-                    env, robot, task,
-                    asset_root="../../deps/isaacgym/assets",
-                    controller_type='position',
-                    num_envs=trajs_pos.shape[1],
-                    all_robots_in_one_env=True,
-                    color_robots=False,
-                    show_goal_configuration=True,
-                    sync_with_real_time=True,
-                    show_collision_spheres=False,
-                    dt=dt,
-                    **results_data_dict,
-                    # show_collision_spheres=True
-                )
-
-                motion_planning_controller = MotionPlanningController(motion_planning_isaac_env)
-                motion_planning_controller.run_trajectories(
-                    trajs_pos,
-                    start_states_joint_pos=trajs_pos[0], goal_state_joint_pos=trajs_pos[-1][0],
-                    n_first_steps=n_first_steps,
-                    n_last_steps=n_last_steps,
-                    visualize=True,
-                    render_viewer_camera=True,
-                    make_video=True,
-                    video_path=os.path.join(results_dir, f'{base_file_name}-isaac-controller-position.mp4'),
-                    make_gif=False
-                )
-            else:
-                # visualize in the planning environment
-                planner_visualizer.animate_opt_iters_robots(
-                    trajs=pos_trajs_iters, start_state=start_state_pos, goal_state=goal_state_pos,
-                    traj_best=traj_final_free_best,
-                    video_filepath=os.path.join(results_dir, f'{base_file_name}-traj-opt-iters.mp4'),
-                    n_frames=max((2, len(trajs_iters))),
-                    anim_time=5
-                )
-
-                planner_visualizer.animate_robot_trajectories(
-                    trajs=pos_trajs_iters[-1], start_state=start_state_pos, goal_state=goal_state_pos,
-                    plot_trajs=True,
-                    video_filepath=os.path.join(results_dir, f'{base_file_name}-robot-traj.mp4'),
-                    # n_frames=max((2, pos_trajs_iters[-1].shape[1]//10)),
-                    n_frames=pos_trajs_iters[-1].shape[1],
-                    anim_time=trajectory_duration
-                )
-
-            plt.show()
 
 
 if __name__ == '__main__':
+    # Ensure the launcher sees concrete annotation objects despite postponed evaluation.
+    experiment.__annotations__ = get_type_hints(experiment)
     # Leave unchanged
     run_experiment(experiment)
