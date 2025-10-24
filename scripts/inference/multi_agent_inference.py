@@ -4,6 +4,8 @@
 
 
 import os
+from datetime import datetime
+
 import pickle
 from math import ceil
 from pathlib import Path
@@ -55,8 +57,8 @@ def experiment(
     planner_alg: str = 'mpd',
     use_guide_on_extra_objects_only: bool = False,
     # num_agents: int = 1, # sanity check
-    num_agents: int = 16, # number of agents
-    n_samples: int = 128,
+    num_agents: int = 2, # number of agents
+    n_samples: int = 64,
     start_guide_steps_fraction: float = 0.25,
     n_guide_steps: int = 5,
     n_diffusion_steps_without_noise: int = 0,
@@ -77,6 +79,7 @@ def experiment(
     device: str = 'cuda',
 
     debug: bool = True,
+    # debug: bool = False,
 
     render: bool = True,
 
@@ -111,10 +114,19 @@ def experiment(
 
     ########################################################################################################################
     model_dir = os.path.join(TRAINED_MODELS_DIR, model_id)
+
+    ### Creating results directory 
+
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    experiment_result_folder = os.path.join(results_dir, timestamp)
+    os.makedirs(experiment_result_folder, exist_ok=True)
+    print("Created experiment result directory: {}".format(experiment_result_folder))
+
+
     results_dir = os.path.join(model_dir, 'results_inference', str(seed))
     os.makedirs(results_dir, exist_ok=True)
-
     args = load_params_from_yaml(os.path.join(model_dir, "args.yaml"))
+
 
     ########################################################################################################################
     # Load dataset with env, robot, task
@@ -295,11 +307,11 @@ def experiment(
             H=n_support_points,
             D=dataset.state_dim, # type: ignore
             device=device,
-            collision_threshold = 0.5,
+            collision_threshold = 1,
             sigma = {
             # Smaller -> Stronger penalty
                "position_factor": 1e4,
-               "collision_factor": 1e-3,
+               "collision_factor": 1e5,
                "smoothness_factor": 1e-3
             },
             lr = 1e-2,
@@ -317,14 +329,14 @@ def experiment(
             H=n_support_points,
             D=dataset.state_dim, # type: ignore
             device=device,
-            collision_threshold = 0.8,
+            collision_threshold = 0.2,
             sigma = {
             # Denominator. Smaller -> Stronger penalty
                "position_factor": 1e4,
-               "collision_factor": 1e-7,
-               "smoothness_factor": 5e-3
+               "collision_factor": 1e-10,
+               "smoothness_factor": 1e3
             },
-            lr = 1e-2,
+            lr = 1e-5,
             steps = 500,
         )
         
@@ -506,19 +518,21 @@ def experiment(
         with open(os.path.join(results_dir, 'results_data_dict.pickle'), 'wb') as handle:
             pickle.dump(results_data_dict, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-    ########################################################################################################################
-    # Render results
+        ########################################################################################################################
+        # Render results
     if render:
         trajs_iters_all_agents_pos = trajs_iters_all_agents_pos.permute(1, 0, 2, 3, 4) # (B, T, N, H, D)
         planner_visualizer = PlanningVisualizer(
             task=task
         )
         fig, axs = planner_visualizer.render_multi_robot_trajectories_steps(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos)
-        plt.savefig("final_trajectory.png")
+        
+        plt.savefig(os.path.join(experiment_result_folder, "final_trajectory.png"))
         plt.close(fig)
-        planner_visualizer.animate_opt_iters_multi_robots(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos)
-        # TODO: fill in here
-        planner_visualizer.animate_multi_robot_trajectories(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos, n_interpolation=1)
+        planner_visualizer.animate_opt_iters_multi_robots(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos, 
+                                                          video_filepath=os.path.join(experiment_result_folder, "opt_iters.mp4"))
+        planner_visualizer.animate_multi_robot_trajectories(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos, n_interpolation=2,
+                                                          video_filepath=os.path.join(experiment_result_folder, "multi_robot_trajectories.mp4"))
     return 
 
 
