@@ -81,3 +81,71 @@ def guide_gradient_steps(
         x = apply_hard_conditioning(x, hard_conds)
 
     return x
+
+## Factor Guided DDPM sampling function, with SVI factor update on predicted data
+@torch.no_grad()
+def ddpm_sample_fn_with_factor_guidance(
+        model, x, hard_conds, context, t,
+        t_start_guide=torch.inf,
+        noise_std_extra_schedule_fn=None,  # 'linear'
+        **kwargs
+):
+
+    assert kwargs["guidance"] is not None
+    guidance = kwargs["guidance"]
+    guidance_param = kwargs["guidance_param"]
+    t_single = t[0]
+    if t_single < 0:
+        t = torch.zeros_like(t)
+
+    # Predict the clean reconstruction x0_hat
+    if context is not None:
+        context = model.context_model(context)
+    
+    noise_pred = model.model(x, t, context)
+    x_recon = model.predict_start_from_noise(x, t=t, noise=noise_pred)
+
+    if model.clip_denoised:
+        x_recon.clamp_(-1., 1.)
+
+    # Apply Model-Based inference
+    B = kwargs["guidance_param"]["B"]
+    N = kwargs["guidance_param"]["N"]
+    H = kwargs["guidance_param"]["H"]
+    D = kwargs["guidance_param"]["D"]
+    x_recon = x_recon.view(B, N, H, D)
+    if t_single < t_start_guide:
+        alpha_bar_t = model.alphas_cumprod[t_single].clone().detach()
+        with torch.enable_grad():
+            guidance = guidance(**guidance_param)
+            x_recon_refined = guidance.forward(x_recon, alpha_bar_t)
+        if kwargs["debug"]:
+            print(f"Denoising step {t_single}", guidance.compute_refinement(x_recon, x_recon_refined))
+    else:
+        x_recon_refined = x_recon
+
+    x_recon_refined = x_recon_refined.view(B*N, H, D).clone().detach()
+
+        
+    # Compute posterior q(x_{t-1} | x_t, x0_hat)
+    model_mean, posterior_variance, posterior_log_vaiance = model.q_posterior(
+        x_start = x_recon_refined,
+        x_t = x,
+        t = t
+    )
+    model_std = torch.exp(0.5 * posterior_log_vaiance)
+
+    # Adding noise back
+    noise = torch.randn_like(x)
+    noise[t==0] = 0
+
+    # For smoother results, we can decay the noise standard deviation throughout the diffusion
+    # this is roughly equivalent to using a temperature in the prior distribution
+    if noise_std_extra_schedule_fn is None:
+        noise_std = 1.0
+    else:
+        noise_std = noise_std_extra_schedule_fn(t_single)
+
+    values = None
+    return model_mean + model_std * noise * noise_std, values
+

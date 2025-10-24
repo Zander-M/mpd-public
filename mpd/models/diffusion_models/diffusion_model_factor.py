@@ -3,17 +3,12 @@ Child Class from Gaussian Diffusion Model
 Adding Factor Graph inference steps between denoising 
 Provides Run Inference Once function
 """
-from copy import copy
 
 import einops
-import pyro
-import pyro.distributions as dist
-from pyro.infer import SVI, Trace_ELBO
-from pyro.optim import Adam
 import torch
 
 from mpd.models.diffusion_models import GaussianDiffusionModel
-from mpd.models.diffusion_models.sample_functions import extract, apply_hard_conditioning, ddpm_sample_fn
+from mpd.models.diffusion_models.sample_functions import extract, apply_hard_conditioning, ddpm_sample_fn, ddpm_sample_fn_with_factor_guidance
 
 def make_timesteps(batch_size, i, device):
     t = torch.full((batch_size,), i, device=device, dtype=torch.long)
@@ -43,9 +38,6 @@ class GaussianDiffusionFactorModel(GaussianDiffusionModel):
                                trajs_normalized,
                                t,
                                context=None, hard_conds=None, 
-                               model_guide=None,
-                               model_guide_param=None,
-                               debug=False,
                                **diffusion_kwargs):
         """
         Run one denoising step for all agents in batch mode (or one agent if agent_idx is specified).
@@ -89,14 +81,6 @@ class GaussianDiffusionFactorModel(GaussianDiffusionModel):
             )  
 
             X_noisy = samples_flat.clone().detach().reshape(B, N, H, D)
-
-        if model_guide is not None and t < 10 and t > 0:
-            alpha_bar_t = self.alphas_cumprod[t].clone().detach()
-            guidance = model_guide(**model_guide_param)
-            X_refined = guidance.forward(X_noisy, alpha_bar_t)
-            if debug:
-                print(f"Denoising step {t}: ", guidance.compute_refinement(X_noisy, X_refined))
-            return X_refined # (B, N, H, D)
         return X_noisy
 
 
@@ -120,7 +104,6 @@ class GaussianDiffusionFactorModel(GaussianDiffusionModel):
         batch_size = shape[0]
 
         # apply hard constraints
-
         x = apply_hard_conditioning(x, hard_conds)
         t = make_timesteps(batch_size, t, device)
 

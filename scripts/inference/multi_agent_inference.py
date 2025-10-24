@@ -24,7 +24,7 @@ from experiment_launcher import single_experiment_yaml, run_experiment
 from mp_baselines.planners.costs.cost_functions import CostCollision, CostComposite, CostGPTrajectory
 from mpd.models import TemporalUnet, UNET_DIM_MULTS
 from mpd.models.diffusion_models.guides import GuideManagerTrajectoriesWithVelocity
-from mpd.models.diffusion_models.sample_functions import guide_gradient_steps, ddpm_sample_fn
+from mpd.models.diffusion_models.sample_functions import guide_gradient_steps, ddpm_sample_fn, ddpm_sample_fn_with_factor_guidance
 
 from mpd.trainer import get_dataset, get_model
 from mpd.utils.loading import load_params_from_yaml
@@ -57,7 +57,7 @@ def experiment(
     planner_alg: str = 'mpd',
     use_guide_on_extra_objects_only: bool = False,
     # num_agents: int = 1, # sanity check
-    num_agents: int = 2, # number of agents
+    num_agents: int = 8, # number of agents
     n_samples: int = 64,
     start_guide_steps_fraction: float = 0.25,
     n_guide_steps: int = 5,
@@ -287,7 +287,7 @@ def experiment(
     )
 
     t_start_guide = ceil(start_guide_steps_fraction * model.n_diffusion_steps) # type: ignore
-    sample_fn_kwargs = dict(
+    diffusion_kwargs = dict(
         guide = None, # No guide
         # guide=None if run_prior_then_guidance or run_prior_only else guide,
         n_guide_steps=n_guide_steps,
@@ -296,7 +296,6 @@ def experiment(
     )
 
     ######## Initial Factor Guide
-    # TODO: implement factor graph based guide here
     if guidance_model == "FactorGuideSingleAgent":
         print("Using Factor Guide Single Agent")
 
@@ -329,15 +328,15 @@ def experiment(
             H=n_support_points,
             D=dataset.state_dim, # type: ignore
             device=device,
-            collision_threshold = 0.2,
+            collision_threshold = 0.5,
             sigma = {
             # Denominator. Smaller -> Stronger penalty
                "position_factor": 1e4,
-               "collision_factor": 1e-10,
-               "smoothness_factor": 1e3
+               "collision_factor": 1e-7,
+               "smoothness_factor": 1e-7
             },
-            lr = 1e-5,
-            steps = 500,
+            lr = 1e-2,
+            steps = 100,
         )
         
         model_guide = FactorGuideCentralized   
@@ -352,6 +351,11 @@ def experiment(
         print("No guidance model used.")
         model_guide = None
         model_guide_param = None
+    
+    diffusion_kwargs["guidance"] = model_guide
+    diffusion_kwargs["guidance_param"] = model_guide_param 
+    diffusion_kwargs["debug"] = debug
+
     ########
     # Sample trajectories with the diffusion/cvae model
 
@@ -370,11 +374,8 @@ def experiment(
                 context=None,
                 hard_conds=hard_conds_all,
                 horizon=n_support_points,
-                sample_fn=ddpm_sample_fn,
-                model_guide=model_guide, # type: ignore
-                model_guide_param=model_guide_param, # type: ignore
-                debug=debug,
-                **sample_fn_kwargs,
+                sample_fn=ddpm_sample_fn_with_factor_guidance,
+                **diffusion_kwargs,
             )
             trajs_normalized_iters.append(trajs_normalized.clone())
 
@@ -529,10 +530,10 @@ def experiment(
         
         plt.savefig(os.path.join(experiment_result_folder, "final_trajectory.png"))
         plt.close(fig)
-        planner_visualizer.animate_opt_iters_multi_robots(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos, 
-                                                          video_filepath=os.path.join(experiment_result_folder, "opt_iters.mp4"))
-        planner_visualizer.animate_multi_robot_trajectories(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos, n_interpolation=2,
-                                                          video_filepath=os.path.join(experiment_result_folder, "multi_robot_trajectories.mp4"))
+        # planner_visualizer.animate_opt_iters_multi_robots(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos, 
+                                                        #   video_filepath=os.path.join(experiment_result_folder, "opt_iters.mp4"))
+        # planner_visualizer.animate_multi_robot_trajectories(start_goal_pairs=start_goal_pairs, trajs=trajs_iters_all_agents_pos, n_interpolation=2,
+                                                        #   video_filepath=os.path.join(experiment_result_folder, "multi_robot_trajectories.mp4"))
     return 
 
 

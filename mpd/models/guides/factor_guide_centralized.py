@@ -152,7 +152,7 @@ class FactorGuideCentralized(PyroModule):
             Iterate through agents and return updated trajectories
         """
         alpha_bar = torch.clamp(alpha_bar, 0.0, 1.0)
-        blend = 0.5
+        # blend = 0.5
         # blend = torch.exp(-(1-alpha_bar)**2)
 
         model, guide, optimizer = self.instance_setup(X_noisy=X_noisy, alpha_bar=alpha_bar)
@@ -167,7 +167,7 @@ class FactorGuideCentralized(PyroModule):
         ], dim=2)
         
         # Blend schedule
-        X_refined = (blend) * X_noisy + (1-blend) * X_refined
+        # X_refined = (blend) * X_noisy + (1-blend) * X_refined
         return X_refined
     
     ## Utils
